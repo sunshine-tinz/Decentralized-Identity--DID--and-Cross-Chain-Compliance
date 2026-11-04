@@ -11,7 +11,7 @@
  *  5. Display the resulting DID string
  */
 
-import React, { useState } from "react";
+import { useState } from "react";
 
 export default function RegisterPage() {
   const [status, setStatus] = useState<string>("");

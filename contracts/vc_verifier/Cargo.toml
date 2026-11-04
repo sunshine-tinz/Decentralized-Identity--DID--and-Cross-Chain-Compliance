@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+# `rlib` is required so the compliance engine can depend on this crate in tests
+# (cross-contract policy evaluation). `cdylib` produces the deployable WASM.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }

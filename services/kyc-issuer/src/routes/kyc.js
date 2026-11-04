@@ -1,68 +1,92 @@
 /**
  * KYC request routes (user-facing)
  *
- * POST /api/kyc/request   — submit a KYC request
- * GET  /api/kyc/status/:id — poll request status
- * GET  /api/kyc/credential/:userId — one-time credential retrieval
+ * POST /api/kyc/request          — submit a KYC request
+ * GET  /api/kyc/status/:id       — poll request status
+ * GET  /api/kyc/credential/:token — one-time credential retrieval
+ *
+ * No endpoint here trusts a caller-supplied identifier as an authorisation
+ * token. Credential retrieval is keyed on a high-entropy token generated at
+ * submission time and returned exactly once to the submitter.
  */
 
 "use strict";
 
 const { Router } = require("express");
-const { v4: uuidv4 } = require("uuid");
+const crypto = require("crypto");
 const store = require("../store");
+const { validateKycRequest, isValidRetrievalToken } = require("../lib/validate");
 
 const router = Router();
 
 /**
  * Submit a KYC request.
  *
- * Body: { userId, issuerPubkey, attributes: string[], personalInfo: {}, documentPhoto: base64 }
+ * Body: { userId, issuerPubkey, attributes: string[], personalInfo?: {}, documentPhoto?: base64 }
+ * Response: { requestId, retrievalToken }
  *
- * TODO: validate issuerPubkey is a registered issuer (192-char hex BLS key)
- * TODO: add input sanitisation and file-size limits
+ * The retrieval token is the only way to collect the resulting credential.
+ * Treat it as a secret.
  */
 router.post("/request", (req, res) => {
-  const { userId, issuerPubkey, attributes, personalInfo, documentPhoto } = req.body;
-
-  if (!userId || !issuerPubkey || !Array.isArray(attributes) || attributes.length === 0) {
-    return res.status(400).json({ error: "Missing required fields" });
+  const validation = validateKycRequest(req.body);
+  if (!validation.ok) {
+    return res.status(400).json({ error: validation.error });
   }
 
-  const requestId = uuidv4();
+  const { userId, issuerPubkey, attributes, personalInfo, documentPhoto } =
+    validation.value;
+
+  const requestId = crypto.randomUUID();
+  const retrievalToken = crypto.randomUUID();
+
   store.kycRequests.set(requestId, {
     requestId,
     userId,
     issuerPubkey,
     attributes,
-    personalInfo,   // TODO: encrypt at rest
-    documentPhoto,  // TODO: store in object storage, keep only reference here
+    personalInfo,
+    documentPhoto,
+    retrievalToken,
     status: "pending",
     createdAt: Date.now(),
   });
 
-  return res.json({ requestId });
+  return res.json({ requestId, retrievalToken });
 });
 
 /**
- * Poll request status.
+ * Poll request status. Returns status only — never personal data.
  */
 router.get("/status/:requestId", (req, res) => {
-  const req_ = store.kycRequests.get(req.params.requestId);
-  if (!req_) return res.status(404).json({ error: "Not found" });
-  return res.json({ status: req_.status, requestId: req_.requestId });
+  const kycRequest = store.kycRequests.get(req.params.requestId);
+  if (!kycRequest) return res.status(404).json({ error: "Not found" });
+
+  return res.json({
+    status: kycRequest.status,
+    requestId: kycRequest.requestId,
+    createdAt: kycRequest.createdAt,
+  });
 });
 
 /**
  * One-time credential retrieval.
- * Deletes the credential from the store after returning it.
+ *
+ * Requires the unguessable token issued at submission time, and deletes the
+ * credential after a successful read. A caller cannot consume another person's
+ * credential by knowing their userId, and cannot enumerate tokens.
  */
-router.get("/credential/:userId", (req, res) => {
-  const cred = store.issuedCredentials.get(req.params.userId);
-  if (!cred) return res.status(404).json({ error: "No credential available" });
+router.get("/credential/:token", (req, res) => {
+  const { token } = req.params;
+  if (!isValidRetrievalToken(token)) {
+    return res.status(404).json({ error: "No credential available" });
+  }
 
-  store.issuedCredentials.delete(req.params.userId); // one-time retrieval
-  return res.json(cred);
+  const credential = store.issuedCredentials.get(token);
+  if (!credential) return res.status(404).json({ error: "No credential available" });
+
+  store.issuedCredentials.delete(token);
+  return res.json(credential);
 });
 
 module.exports = router;

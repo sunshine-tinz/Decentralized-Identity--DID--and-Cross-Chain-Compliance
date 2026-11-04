@@ -1,6 +1,7 @@
 # Contributing Guide
 
-Welcome! This project is structured so contributors can pick up well-scoped issues and make meaningful progress independently. Read `docs/architecture.md` first to understand the system.
+Read `AUDIT.md` first: it lists the confirmed findings, their severity, and the
+acceptance criteria for each. Those are the highest-value contributions.
 
 ---
 
@@ -8,112 +9,139 @@ Welcome! This project is structured so contributors can pick up well-scoped issu
 
 | Tool | Version | Purpose |
 |---|---|---|
-| Rust | ≥ 1.74 | Soroban contracts |
-| `soroban-cli` | ≥ 21.0 | Deploy & test contracts |
-| Node.js | ≥ 20 | Services & frontend |
-| Freighter wallet | latest | Browser wallet for testing |
+| Rust | 1.88 (see `contracts/rust-toolchain.toml`) | Soroban contracts |
+| `rustfmt`, `clippy`, `wasm32-unknown-unknown` | matching 1.88 | Format, lint, build WASM |
+| `stellar-cli` | latest (`soroban-cli` ≥ 21) | Deploy & invoke contracts |
+| Node.js | ≥ 20 (CI uses 24) | Services, SDK, frontend |
 
-Install Soroban CLI:
 ```bash
-cargo install --locked soroban-cli --features opt
+rustup component add rustfmt clippy
+rustup target add wasm32-unknown-unknown
+cargo install --locked stellar-cli --features opt
 ```
 
 ---
 
-## Project Setup
+## Project setup
 
 ```bash
-# Clone
 git clone <repo-url>
 cd Decentralized-Identity--DID--and-Cross-Chain-Compliance
 
-# Build contracts
+# Contracts
 cd contracts
-cargo build --target wasm32-unknown-unknown --release
+cargo fmt --all -- --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+cargo build --target wasm32-unknown-unknown --release --locked
+# → target/wasm32-unknown-unknown/release/{did_registry,vc_verifier,compliance_engine}.wasm
 
-# Run contract tests
-cargo test
+# Services
+cd ../services/kyc-issuer && npm ci
+cd ../cross-chain-bridge && npm ci
 
-# Install service dependencies
-cd ../services/kyc-issuer && npm install
-cd ../cross-chain-bridge && npm install
+# SDK
+cd ../../sdk && npm ci
 
-# Install SDK dependencies
-cd ../../sdk && npm install
-
-# Install frontend dependencies
-cd ../frontend && npm install
+# Frontend
+cd ../frontend && npm ci
 ```
+
+The frontend depends on the local SDK via `"file:../sdk"`; build the SDK before
+building the frontend (`cd sdk && npm run build`).
 
 ---
 
-## Running Locally
+## Running locally
 
 ```bash
-# Terminal 1 — KYC Issuer service
+# Terminal 1 — KYC issuer service
 cd services/kyc-issuer
-cp .env.example .env   # fill in SOROBAN_RPC_URL, CONTRACT_IDs
-npm run dev
+cp .env.example .env          # set ISSUER_KEYS (see below)
+npm start                     # http://localhost:3001
 
-# Terminal 2 — Cross-chain bridge (optional)
+# Terminal 2 — Cross-chain bridge (requires a deployed ComplianceEngine)
 cd services/cross-chain-bridge
 cp .env.example .env
-npm run dev
+npm start
 
 # Terminal 3 — Frontend
 cd frontend
-npm run dev
+npm run dev                   # http://localhost:5173
 ```
 
----
+### Issuer API keys
 
-## Good First Issues
-
-Look for issues tagged `good first issue`. Typical entry points:
-
-- **Contracts**: implement a stubbed function (marked `// TODO`)
-- **SDK**: implement a client method that calls a contract
-- **Services**: add input validation, database persistence, or a new route
-- **Frontend**: wire up a page to the SDK / service API
-- **Tests**: add test coverage for an existing function
-
----
-
-## Code Style
-
-- **Rust**: `cargo fmt` + `cargo clippy --all-targets`
-- **TypeScript/JS**: ESLint + Prettier (configs in each package)
-- Keep functions small and focused. Add a `// TODO` comment for every unimplemented path.
-- All public contract functions must have a doc comment explaining parameters and panics.
-
----
-
-## Submitting a PR
-
-1. Fork the repo and create a branch: `git checkout -b feat/your-feature`
-2. Make your changes and add/update tests
-3. Run `cargo test` (contracts) and `npm test` (services/SDK)
-4. Open a PR with a clear description of what you changed and why
-5. Reference the issue number in the PR description
-
----
-
-## Contract Deployment (Testnet)
+Issuer routes require `x-issuer-key`. The key is mapped to an issuer public key
+server-side:
 
 ```bash
-# Build
-cargo build --target wasm32-unknown-unknown --release -p did-registry
+# Generate a key
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
-# Deploy to testnet
-soroban contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/did_registry.wasm \
-  --source <your-secret-key> \
+# .env
+ISSUER_KEYS=<apiKey>:<192-hex-issuer-pubkey>
+```
+
+Credential issuance is **disabled by default** because the service cannot mint
+verifiable BLS credentials. `PLACEHOLDER_ISSUANCE_ENABLED=true` produces explicitly
+non-verifiable placeholders for plumbing tests only.
+
+---
+
+## Checks before opening a PR
+
+```bash
+cd contracts && cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked && cargo build --target wasm32-unknown-unknown --release --locked
+cd services/kyc-issuer && npm test
+cd services/cross-chain-bridge && npm test
+cd sdk && npm run build && npm test && npm run lint
+cd frontend && npm run build
+```
+
+CI runs exactly these. A PR that leaves any of them failing will not merge.
+
+---
+
+## Code style
+
+- **Rust**: `cargo fmt` and `cargo clippy --all-targets -- -D warnings` (clean).
+- **TypeScript (SDK)**: ESLint (`sdk/eslint.config.mjs`).
+- **JavaScript services / frontend**: no linter is configured yet (tracked in
+  `AUDIT.md` M-16). Match the surrounding style.
+- Document every public contract function, including its panics.
+- Do not add a `TODO` for a security-relevant path and leave the unsafe behaviour
+  in place. Fail closed instead.
+
+---
+
+## Contract deployment (Testnet)
+
+```bash
+cd contracts
+cargo build --target wasm32-unknown-unknown --release --locked
+
+stellar contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/vc_verifier.wasm \
+  --source <admin-secret-key> \
   --network testnet
 
-# Initialize
-soroban contract invoke \
-  --id <CONTRACT_ID> \
+stellar contract invoke \
+  --id <VC_VERIFIER_ID> \
   --source <admin-secret-key> \
   --network testnet \
   -- initialize --admin <admin-address>
 ```
+
+**Deploy and initialise atomically.** Both `VCVerifier.initialize` and
+`ComplianceEngine.initialize` take the admin as a parameter and can be front-run
+if initialisation is left for a later transaction (`AUDIT.md` H-7).
+
+Then:
+
+1. `ComplianceEngine.set_verifier(admin, <VC_VERIFIER_ID>)`
+2. `VCVerifier.add_issuer(admin, <issuer-address>)`
+3. `ComplianceEngine.set_policy(admin, <policy>, [<attributes>...])`
+
+There are **no recorded Testnet deployment addresses** for this repository. Do not
+publish addresses or transaction hashes that have not actually been produced.

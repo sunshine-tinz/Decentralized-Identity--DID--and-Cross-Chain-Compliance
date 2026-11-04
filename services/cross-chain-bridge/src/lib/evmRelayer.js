@@ -1,59 +1,120 @@
 /**
  * EVM Attestation Relayer
  *
- * Submits compliance attestations to the AttestationReceiver contract on EVM chains.
+ * Submits a signed compliance attestation to an AttestationReceiver contract on
+ * an EVM chain.
  *
- * TODO for contributors:
- *  - Deploy AttestationReceiver.sol (see contracts/evm/ — to be created)
- *  - Add signature verification: EVM contract should verify the Stellar-signed payload
- *  - Support multiple chains via a chain registry config
- *  - Add gas estimation and dynamic fee management
+ * # Signing scheme (integrator contract — read this)
+ * The relayer signs an EIP-191 prefixed digest:
+ *
+ *   digest = keccak256(abi.encodePacked(
+ *              subject, policy, compliant, ledger, nonce, chainId))
+ *   signature = personal_sign(digest)
+ *
+ * `nonce` is the unique Stellar event id (keccak256 of it), so a destination
+ * contract can reject replays by tracking consumed nonces. The destination MUST
+ * verify the signature against an allowlisted relayer and MUST store the nonce.
+ * That contract does not exist in this repository yet (AUDIT.md H-9), so this
+ * path has never been exercised end to end.
+ *
+ * The previous implementation sent the literal bytes "stub-signature" and
+ * reported reverted transactions as successes.
  */
 
 "use strict";
 
 const { ethers } = require("ethers");
 
-// Minimal ABI for the EVM receiver contract
-// TODO: replace with full ABI once AttestationReceiver.sol is implemented
+// Interface implemented by the (not yet written) AttestationReceiver.
 const RECEIVER_ABI = [
-  "function receiveAttestation(address subject, string policy, bool compliant, bytes signature) external",
+  "function receiveAttestation(address subject, string policy, bool compliant, bytes32 nonce, bytes signature) external",
+  "function consumedNonce(bytes32 nonce) view returns (bool)",
 ];
 
 class EVMRelayer {
-  constructor({ rpcUrl, receiverAddress, privateKey }) {
-    if (!rpcUrl || !receiverAddress || !privateKey) {
-      console.warn("EVMRelayer: missing config — relay calls will be no-ops");
-      this.enabled = false;
+  /**
+   * @param {object} options
+   * @param {string} [options.rpcUrl]
+   * @param {string} [options.receiverAddress]
+   * @param {string} [options.privateKey]
+   * @param {object} [options.contract] - injected for tests
+   * @param {object} [options.wallet] - injected for tests
+   */
+  constructor({ rpcUrl, receiverAddress, privateKey, contract, wallet } = {}) {
+    this.enabled = false;
+
+    if (contract && wallet) {
+      this.contract = contract;
+      this.wallet = wallet;
+      this.enabled = true;
       return;
     }
+
+    if (!rpcUrl || !receiverAddress || !privateKey) {
+      // Fail closed: callers must check `enabled` and must not silently treat a
+      // disabled relayer as success.
+      return;
+    }
+
     this.provider = new ethers.JsonRpcProvider(rpcUrl);
     this.wallet = new ethers.Wallet(privateKey, this.provider);
-    this.receiver = new ethers.Contract(receiverAddress, RECEIVER_ABI, this.wallet);
+    this.contract = new ethers.Contract(receiverAddress, RECEIVER_ABI, this.wallet);
     this.enabled = true;
   }
 
   /**
-   * Relay a compliance attestation to the EVM chain.
+   * Relay one attestation.
    *
-   * @param {object} attestation - { subject, policy, compliant, ledger }
-   * @returns {string} EVM transaction hash
+   * @param {object} attestation - { id, subject, policy, compliant, ledger }
+   * @returns {Promise<string>} transaction hash of a confirmed, successful tx
+   * @throws when unconfigured, malformed, or the transaction reverts
    */
   async relay(attestation) {
     if (!this.enabled) {
-      console.log("[EVMRelayer] disabled — skipping relay");
-      return null;
+      throw new Error("EVM relayer is not configured");
     }
 
-    const { subject, policy, compliant } = attestation;
+    const { id, subject, policy, compliant, ledger } = attestation || {};
+    if (!id) throw new Error("attestation.id is required");
+    if (typeof subject !== "string" || !ethers.isAddress(subject)) {
+      throw new Error("attestation.subject must be a valid EVM address");
+    }
+    if (typeof policy !== "string" || policy.length === 0) {
+      throw new Error("attestation.policy is required");
+    }
+    if (typeof compliant !== "boolean") {
+      throw new Error("attestation.compliant must be a boolean");
+    }
 
-    // TODO: produce a real Stellar-signed payload for the EVM contract to verify
-    const signature = ethers.toUtf8Bytes("stub-signature");
+    const network = await this.contract.runner?.provider?.getNetwork?.();
+    const chainId = network?.chainId ?? 0;
 
-    const tx = await this.receiver.receiveAttestation(subject, policy, compliant, signature);
-    await tx.wait();
+    const nonce = ethers.keccak256(ethers.toUtf8Bytes(String(id)));
+    const digest = ethers.solidityPackedKeccak256(
+      ["address", "string", "bool", "uint256", "bytes32", "uint256"],
+      [subject, policy, compliant, BigInt(ledger ?? 0), nonce, chainId]
+    );
+    const signature = await this.wallet.signMessage(ethers.getBytes(digest));
+
+    const tx = await this.contract.receiveAttestation(
+      subject,
+      policy,
+      compliant,
+      nonce,
+      signature
+    );
+
+    const receipt = await tx.wait();
+    // ethers resolves `wait()` for reverted transactions; a status of 0 must not
+    // be reported as a successful relay.
+    if (!receipt || receipt.status !== 1) {
+      throw new Error(
+        `attestation transaction reverted (tx ${tx.hash}, status ${receipt && receipt.status})`
+      );
+    }
+
     return tx.hash;
   }
 }
 
-module.exports = { EVMRelayer };
+module.exports = { EVMRelayer, RECEIVER_ABI };

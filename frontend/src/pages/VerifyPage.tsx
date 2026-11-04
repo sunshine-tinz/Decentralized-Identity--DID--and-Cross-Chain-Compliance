@@ -8,7 +8,7 @@
  *  1. Fetch registered issuers from the KYC Issuer service GET /api/issuer/list
  *  2. Add webcam capture for document photo (see jamesbachini.com reference)
  *  3. POST to /api/kyc/request and poll /api/kyc/status/:id
- *  4. On approval, retrieve credential from /api/kyc/credential/:userId
+ *  4. On approval, retrieve credential from /api/kyc/credential/:retrievalToken
  *  5. Store credential in localStorage (optionally AES-GCM encrypted)
  */
 

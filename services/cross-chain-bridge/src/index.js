@@ -1,22 +1,19 @@
 /**
  * Cross-Chain Compliance Bridge
  *
- * Listens for compliance attestation events on Stellar and relays them
- * to EVM chains (Ethereum, Polygon, etc.) so users don't need to re-KYC
- * on every chain — inspired by Chainlink CCIP's cross-chain identity model
- * and KILT Protocol's Decentralized Identity Provider (DIP).
+ * Relays compliance attestations from the Stellar ComplianceEngine contract to
+ * an EVM AttestationReceiver.
  *
  * Flow:
- *  1. Poll Stellar for ComplianceEngine "export_attestation" events
- *  2. Verify the attestation payload (signed by the Stellar compliance contract)
- *  3. Submit a transaction to the EVM AttestationReceiver contract
+ *  1. Read `compliance.attestation` events from Soroban RPC
+ *  2. Decode and validate every field; drop anything malformed
+ *  3. Deduplicate by event id and persist the cursor
+ *  4. Sign and submit to the EVM receiver, verifying the receipt status
  *
- * TODO for contributors:
- *  - Replace polling with Stellar event streaming (horizon /effects endpoint)
- *  - Add signature verification before relaying (prevent spoofed attestations)
- *  - Support multiple destination chains via config
- *  - Add retry logic with exponential backoff for failed EVM submissions
- *  - Implement a nonce / replay-protection mechanism on the EVM side
+ * This service refuses to start unless it can actually verify its input and
+ * submit a signed payload. It previously started with missing configuration and
+ * logged "Relayed to EVM: null". The destination contract does not exist in this
+ * repository yet, so end-to-end relay is untested (AUDIT.md H-9).
  */
 
 "use strict";
@@ -26,10 +23,12 @@ const { StellarListener } = require("./lib/stellarListener");
 const { EVMRelayer } = require("./lib/evmRelayer");
 
 async function main() {
-  const listener = new StellarListener({
-    horizonUrl: process.env.HORIZON_URL || "https://horizon-testnet.stellar.org",
-    complianceContractId: process.env.COMPLIANCE_CONTRACT_ID,
-  });
+  const complianceContractId = process.env.COMPLIANCE_CONTRACT_ID;
+  if (!complianceContractId) {
+    console.error("Refusing to start: COMPLIANCE_CONTRACT_ID is not set");
+    process.exitCode = 1;
+    return;
+  }
 
   const relayer = new EVMRelayer({
     rpcUrl: process.env.EVM_RPC_URL,
@@ -37,20 +36,44 @@ async function main() {
     privateKey: process.env.BRIDGE_PRIVATE_KEY,
   });
 
-  console.log("Bridge starting — listening for Stellar attestations...");
+  if (!relayer.enabled) {
+    console.error(
+      "Refusing to start: EVM_RPC_URL, EVM_RECEIVER_ADDRESS and BRIDGE_PRIVATE_KEY are required"
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const listener = new StellarListener({
+    rpcUrl: process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org",
+    complianceContractId,
+    cursorFile: process.env.CURSOR_FILE || ".bridge-cursor.json",
+  });
 
   listener.on("attestation", async (attestation) => {
-    console.log("Relaying attestation:", attestation);
     try {
       const txHash = await relayer.relay(attestation);
-      console.log("Relayed to EVM:", txHash);
+      console.log(`Relayed attestation ${attestation.id} to EVM: ${txHash}`);
     } catch (err) {
-      console.error("Relay failed:", err.message);
-      // TODO: add to retry queue
+      // Not retried automatically; the cursor is already past this event, so an
+      // operator must replay it. See AUDIT.md for the missing retry queue.
+      console.error(`Relay failed for ${attestation.id}: ${err.message}`);
     }
   });
 
+  listener.on("pollError", (err) => {
+    console.error("Stellar poll error:", err.message);
+  });
+
+  console.log("Bridge starting — listening for Stellar attestations...");
   await listener.start();
 }
 
-main().catch(console.error);
+if (require.main === module) {
+  main().catch((err) => {
+    console.error("Bridge fatal error:", err.message);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { main };

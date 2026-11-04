@@ -15,7 +15,6 @@
  *  - Add toast notifications for transaction status
  */
 
-import React from "react";
 import { BrowserRouter, Routes, Route, Link } from "react-router-dom";
 import RegisterPage from "./pages/RegisterPage";
 import VerifyPage from "./pages/VerifyPage";

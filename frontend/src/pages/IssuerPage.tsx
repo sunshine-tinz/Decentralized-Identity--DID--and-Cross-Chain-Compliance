@@ -11,7 +11,7 @@
  *  5. On reject: POST /api/issuer/reject with reason
  */
 
-import React, { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 
 interface KYCRequest {
   requestId: string;
@@ -21,7 +21,7 @@ interface KYCRequest {
 }
 
 export default function IssuerPage() {
-  const [requests, setRequests] = useState<KYCRequest[]>([]);
+  const [requests] = useState<KYCRequest[]>([]);
 
   useEffect(() => {
     // TODO: replace with real polling using issuer pubkey from wallet

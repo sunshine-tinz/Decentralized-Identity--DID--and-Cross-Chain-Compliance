@@ -7,7 +7,10 @@ members = [
 ]
 
 [workspace.dependencies]
-soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+# NOTE: do not enable `testutils` here. It is a host-side, std-dependent feature and
+# enabling it for all targets breaks the wasm32 contract build (see AUDIT.md C-1).
+# Each crate enables it only for `[dev-dependencies]`.
+soroban-sdk = { version = "21.0.0" }
 
 [profile.release]
 opt-level = "z"

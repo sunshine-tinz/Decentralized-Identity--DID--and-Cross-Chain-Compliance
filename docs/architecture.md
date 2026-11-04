@@ -2,139 +2,163 @@
 
 ## Overview
 
-This project implements a privacy-preserving Decentralized Identity (DID) and cross-chain compliance system on Stellar. It enables users to prove KYC/AML attributes (e.g. "kyc_passed", "accredited_investor") without revealing their identity, and propagates compliance status to EVM chains so users don't need to re-verify on every network.
+The system anchors `did:stellar:` identifiers on Soroban, records issuer-attested
+compliance attributes with expiry and revocation, evaluates compliance policies
+on-chain, and exports attestation snapshots that a relayer can forward to an EVM
+chain.
 
-## Prior Art
+It is a prototype. Ring-signature proofs and standards conformance are **not**
+implemented; see `AUDIT.md` for the full findings.
 
-| Project | Chain | Approach | What we borrow |
-|---|---|---|---|
-| **Polygon ID** | Ethereum/Polygon | ZK-proof DIDs + VCs (Iden3 protocol), W3C standard | W3C DID/VC data model, selective disclosure concept |
-| **KILT Protocol** | Polkadot | Cross-chain DID via Decentralized Identity Provider (DIP), portable identities across parachains | 3-actor model (provider / consumer / user), cross-chain identity portability |
-| **Chainlink ACE** | Multi-chain | Modular compliance engine, CCIP for cross-chain relay, DECO (TLS-based ZKP) for privacy | Modular policy engine, cross-chain attestation relay pattern |
-| **Civic** | Ethereum | Reusable KYC credentials, on-chain verification | Reusable credential concept |
-
-Our approach adapts these patterns to Stellar's unique primitives: Soroban smart contracts, BLS12-381 native curve support, SEP-10/12/45 standards, and the Anchor ecosystem.
-
----
-
-## System Layers
+## Layer diagram
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Frontend (React)                      │
-│  /register  /verify  /prove  /issuer  /admin                │
-└────────────────────────┬────────────────────────────────────┘
-                         │ @stellar-did/sdk (TypeScript)
-┌────────────────────────▼────────────────────────────────────┐
-│                   Soroban Contracts (Rust)                   │
-│                                                             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │ DID Registry │  │ VC Verifier  │  │Compliance Engine │  │
-│  │              │  │              │  │                  │  │
-│  │ register()   │  │ add_issuer() │  │ set_policy()     │  │
-│  │ resolve()    │  │ set_ring()   │  │ is_compliant()   │  │
-│  │ update()     │  │ verify_cred()│  │ export_attest()  │  │
-│  │ deactivate() │  │ proof_count()│  │                  │  │
-│  └──────────────┘  └──────────────┘  └──────────────────┘  │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────────┐
-│                   Off-Chain Services (Node.js)               │
-│                                                             │
-│  ┌─────────────────────────┐  ┌──────────────────────────┐  │
-│  │     KYC Issuer Service  │  │  Cross-Chain Bridge      │  │
-│  │                         │  │                          │  │
-│  │  POST /kyc/request      │  │  Stellar event listener  │  │
-│  │  GET  /kyc/credential   │  │  EVM attestation relayer │  │
-│  │  POST /issuer/approve   │  │                          │  │
-│  └─────────────────────────┘  └──────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    Frontend (React, Vite)                    │
+│  /register  /verify  /prove  /issuer  /admin                 │
+│  Placeholder pages — no SDK or API calls wired yet.          │
+└─────────────────────────┬────────────────────────────────────┘
+                          │ @stellar-did/sdk (TypeScript)
+┌─────────────────────────▼────────────────────────────────────┐
+│                   Soroban Contracts (Rust)                    │
+│                                                              │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐ │
+│  │  DID Registry   │  │  VC Verifier   │  │  Compliance    │ │
+│  │                 │  │                │  │  Engine       │ │
+│  │ register()      │  │ initialize()   │  │ initialize()  │ │
+│  │ update()        │  │ add_issuer()   │  │ set_verifier()│ │
+│  │ deactivate()    │  │ issue_cred()   │  │ set_policy()  │ │
+│  │ resolve()       │  │ revoke_cred()  │  │ is_compliant()│ │
+│  │                 │  │ is_cred_valid()│  │ export_attest()│ │
+│  └────────────────┘  └───────▲────────┘  └───────┬────────┘ │
+│                              │ cross-contract    │          │
+│                              └───────────────────┘          │
+└─────────────────────────┬────────────────────────────────────┘
+                          │ Soroban RPC events
+┌─────────────────────────▼────────────────────────────────────┐
+│                   Off-Chain Services (Node.js)                │
+│  ┌──────────────────────────┐  ┌───────────────────────────┐ │
+│  │     KYC Issuer Service    │  │     Cross-Chain Bridge    │ │
+│  │ POST /api/kyc/request     │  │ Soroban getEvents         │ │
+│  │ GET  /api/kyc/credential  │  │ validate + dedupe          │ │
+│  │ POST /api/issuer/approve  │  │ sign + relay to EVM        │ │
+│  └──────────────────────────┘  └───────────────────────────┘ │
+└──────────────────────────────────────────────────────────────┘
 ```
 
----
+## Contract interactions
 
-## Contract Interactions
+### DID registration
 
-### DID Registration Flow
 ```
-User → DIDRegistry.register(address, documentHash)
-     ← returns did:stellar:<address>
-```
-
-### KYC / Credential Issuance Flow
-```
-1. User → KYC Issuer Service: submit documents + attributes
-2. Issuer reviews off-chain
-3. Issuer → VCVerifier.set_attribute_ring(issuer, "kyc_passed", [pubkeys])
-4. Issuer → KYC Issuer Service: store credential for user
-5. User ← retrieves credential (one-time, deleted after fetch)
+User → DIDRegistry.register(controller, documentHash)
+     ← "did:stellar:<strkey>"
 ```
 
-### Attribute Proof Flow (Privacy-Preserving)
+- Requires the controller's authorisation.
+- Emits `(did, register)` with the controller and identifier.
+- Persistent entries are TTL-extended on write and on resolve.
+
+### Credential issuance (issuer-attested)
+
+```
+1. User    → KYC Issuer Service: POST /api/kyc/request
+             ← { requestId, retrievalToken }
+2. Issuer  → POST /api/issuer/approve  (x-issuer-key)
+3. Issuer  → VCVerifier.issue_credential(issuer, subject, attribute, expiresAt)
+4. User    → GET /api/kyc/credential/<retrievalToken>   (single use)
+```
+
+The issuer must be an admin-registered **address**; the contract checks
+membership before writing. Credentials carry `expires_at` and a `revoked` flag.
+
+### Compliance evaluation
+
+```
+ComplianceEngine.is_compliant(subject, policy)
+  → for each attribute in policy.required_attributes:
+      VCVerifier.is_credential_valid(subject, attribute)
+  → true only if every attribute is valid
+```
+
+Compliance is **computed**, never stored. An unknown policy, an unset verifier, or
+any missing/expired/revoked credential yields `false`.
+
+### Ring-signature attribute proofs (disabled)
+
+The original design:
+
 ```
 1. User fetches ring: VCVerifier.get_ring("kyc_passed")
-2. User generates ring signature client-side (BLS12-381)
-   — no private key leaves the browser
-3. User → VCVerifier.verify_credential("kyc_passed", challenge, signature)
-4. Contract verifies ring closure, increments proof_count
-5. VCVerifier → ComplianceEngine.set_compliance_status(user, "defi_pool", true)
+2. User generates a ring signature client-side
+3. User → VCVerifier.verify_credential(...)
+4. Contract verifies ring closure and records the proof
 ```
 
-### Cross-Chain Relay Flow
+This is **not implemented**. `verify_credential` always returns `false` and does
+not mutate state, because the pinned SDK has no BLS12-381 host functions and no
+scheme was specified. Any future implementation needs domain separation
+(contract id, network, attribute, subject, nonce, ledger), a nullifier for replay
+protection, and protection against rogue keys.
+
+### Cross-chain relay
+
 ```
-1. ComplianceEngine emits attestation event
-2. Bridge service detects event via Horizon polling
-3. Bridge → EVM AttestationReceiver.receiveAttestation(subject, policy, compliant, sig)
-4. EVM dApps query AttestationReceiver for compliance status
+1. ComplianceEngine.export_attestation(subject, policy)
+     emits (compliance, attestation) = (subject, policy, compliant)
+2. Bridge reads Soroban RPC getEvents, filtering by contract + topics
+3. Bridge validates contract id, topics, address, policy, and boolean
+4. Bridge signs EIP-191(keccak256(subject, policy, compliant, ledger, nonce, chainId))
+5. Bridge → EVM AttestationReceiver.receiveAttestation(subject, policy, compliant, nonce, sig)
+6. Bridge verifies receipt.status == 1
 ```
 
----
+Step 5's destination contract is **not in this repository**. Without it there is no
+relayer allowlist, no nonce replay protection on the destination, and no finality
+policy. The attestation payload is a snapshot, not an on-chain signature: only the
+relayer's signature can be verified, which makes the relayer a trusted party.
 
-## Privacy Model
+## Privacy model
 
-- **On-chain**: only BLS public keys, attribute rings, and aggregate counters. No PII.
-- **Ring signatures**: prove membership in a group without revealing which member signed. Anonymity set = ring size (default: 5).
-- **Ring unlinkability**: different rings per attribute → proofs for "kyc_passed" and "over_18" cannot be correlated.
-- **Off-chain**: KYC service uses ephemeral in-memory storage; credentials deleted after one-time retrieval.
+- **On-chain**: addresses, attribute symbols, credential timestamps and flags, and
+  policy definitions. No PII.
+- **Off-chain**: the KYC service holds personal data and documents in process
+  memory. There is no encryption at rest, no retention job, and no database.
+- **Anonymity: none.** Ring decoys in the placeholder credential builder are random
+  filler, not cryptographic ring members. Do not make anonymity or
+  unlinkability claims about this code.
+- Credential retrieval uses a single-use token; it is not keyed on a user-supplied
+  identifier.
 
----
+## Standards
 
-## Standards Compliance
-
-| Standard | Usage |
+| Standard | Status |
 |---|---|
-| W3C DID Core | DID document format, `did:stellar:` method |
-| W3C VC Data Model | Verifiable Credential envelope |
-| Stellar SEP-10 | Wallet authentication for service endpoints |
-| Stellar SEP-12 | KYC data schema for anchor integration |
-| Stellar SEP-45 | Contract account authentication |
-| BLS12-381 | Ring signature scheme (native Soroban support) |
+| W3C DID Core | Partial — identifier + document hash only; no DID document or resolver |
+| W3C VC Data Model | Not implemented |
+| SEP-10 / SEP-12 / SEP-45 | Not implemented (see `sep-references.md`) |
+| BLS12-381 | Not available in the pinned SDK (Protocol 22+ required); no scheme implemented |
 
----
+## Storage and retention
 
-## Directory Structure
+| Contract | Key | Durability |
+|---|---|---|
+| DID Registry | `DID:<address>` | persistent, TTL bumped on write/resolve |
+| VC Verifier | `RING:<attribute>` | persistent, TTL bumped on write |
+| VC Verifier | `CRED:<subject>:<attribute>` | persistent, TTL bumped on write |
+| Compliance | `POL:<name>` | persistent, TTL bumped on write |
+| VC Verifier / Compliance | `ADMIN`, `ISSUERS`, `VERIFIER` | instance, TTL bumped on write |
 
-```
-contracts/
-  did_registry/       # W3C DID anchoring on Stellar
-  vc_verifier/        # BLS ring signature credential verification
-  compliance_engine/  # Policy-based compliance rules + cross-chain export
+TTL constants are conservative (threshold 4,096; extend to 17,280 ledgers). Adjust
+per network before relying on long-lived identity records.
 
-services/
-  kyc-issuer/         # Off-chain KYC review + credential issuance
-  cross-chain-bridge/ # Stellar → EVM attestation relay
+## Known limitations
 
-sdk/
-  src/
-    clients/          # DIDClient, VCClient, ComplianceClient
-    types.ts          # Shared TypeScript types
+See `AUDIT.md`. The principal ones:
 
-frontend/
-  src/
-    pages/            # React pages for each user role
-
-docs/
-  architecture.md     # This file
-  contributing.md     # Contributor guide
-  sep-references.md   # Stellar SEP standards reference
-```
+1. Ring proofs disabled; no anonymity.
+2. No EVM destination contract; relay untested end to end.
+3. KYC service is in-memory and unencrypted; credentials it mints are placeholders.
+4. DID identifiers are bound to the controller key (no rotation/recovery).
+5. Initialisation is not atomic with deployment (front-running risk on deploy).
+6. Frontend pages are placeholders.

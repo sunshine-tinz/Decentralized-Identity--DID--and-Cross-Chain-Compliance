@@ -8,6 +8,9 @@ dist/
 # Soroban test snapshots (generated, not source)
 test_snapshots/
 
+# Cross-chain bridge cursor state
+.bridge-cursor.json
+
 # Environment files
 .env
 .env.*

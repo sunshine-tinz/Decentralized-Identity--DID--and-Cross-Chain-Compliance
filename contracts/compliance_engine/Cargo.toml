@@ -11,3 +11,5 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+# Used by the cross-contract policy-evaluation tests.
+vc-verifier = { path = "../vc_verifier" }

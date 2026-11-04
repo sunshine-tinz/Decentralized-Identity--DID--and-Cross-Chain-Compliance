@@ -8,13 +8,14 @@
     "dev": "nodemon src/index.js",
     "test": "jest --runInBand"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@stellar/stellar-sdk": "^12.0.0",
-    "express": "^4.18.2",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "multer": "^1.4.5-lts.1",
-    "uuid": "^9.0.0"
+    "express": "^4.18.2"
   },
   "devDependencies": {
     "jest": "^29.7.0",
