@@ -2,6 +2,7 @@
 name = "vc-verifier"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [lib]
 # `rlib` is required so the compliance engine can depend on this crate in tests

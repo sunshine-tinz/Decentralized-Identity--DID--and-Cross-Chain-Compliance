@@ -7,7 +7,8 @@
  * Flow:
  *  1. Read `compliance.attestation` events from Soroban RPC
  *  2. Decode and validate every field; drop anything malformed
- *  3. Deduplicate by event id and persist the cursor
+ *  3. Deduplicate by event id, and advance the persisted cursor only once the
+ *     relay for that event has been confirmed
  *  4. Sign and submit to the EVM receiver, verifying the receipt status
  *
  * This service refuses to start unless it can actually verify its input and
@@ -51,14 +52,15 @@ async function main() {
   });
 
   listener.on("attestation", async (attestation) => {
-    try {
-      const txHash = await relayer.relay(attestation);
-      console.log(`Relayed attestation ${attestation.id} to EVM: ${txHash}`);
-    } catch (err) {
-      // Not retried automatically; the cursor is already past this event, so an
-      // operator must replay it. See AUDIT.md for the missing retry queue.
-      console.error(`Relay failed for ${attestation.id}: ${err.message}`);
-    }
+    // Throwing is how the listener is told delivery was not confirmed: it leaves the
+    // event unprocessed and retries it on the next poll. Catching here would silently
+    // drop the attestation (ACCEPTANCE-AUDIT.md H-2).
+    //
+    // Delivery is at-least-once: a poll that cannot relay stops at the failed event
+    // and retries it until it succeeds, so a permanently failing event blocks the
+    // events behind it (head-of-line). An operator sees it via "pollError".
+    const txHash = await relayer.relay(attestation);
+    console.log(`Relayed attestation ${attestation.id} to EVM: ${txHash}`);
   });
 
   listener.on("pollError", (err) => {

@@ -19,11 +19,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+        # Pinned to the commit behind the 1.88.0 branch: a mutable `@master`
+        # reference in the job that has repository write access is a supply-chain risk.
+        uses: dtolnay/rust-toolchain@360a4e93673de6630fac2478bc9e35244b01a759
         with:
           toolchain: "1.88.0"
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
       - uses: actions/cache@v4
         with:
           path: |
@@ -40,7 +42,7 @@ jobs:
         run: cargo test --locked
       # Deployment artifacts. This is what `cargo test` alone cannot catch.
       - name: WASM build
-        run: cargo build --target wasm32-unknown-unknown --release --locked
+        run: cargo build --target wasm32v1-none --release --locked
 
   kyc-issuer:
     name: KYC Issuer Service

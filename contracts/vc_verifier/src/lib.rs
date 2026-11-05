@@ -84,13 +84,18 @@ const CRED_PREFIX: &str = "CRED";
 /// limits the storage/gas impact of an attacker-supplied ring.
 const MAX_RING_SIZE: u32 = 16;
 
-/// Minimum remaining TTL before a persistent entry is extended.
-const TTL_THRESHOLD: u32 = 4_096;
+/// Minimum remaining TTL before a persistent entry is extended (~7.5 days at 5 s/ledger).
+const TTL_THRESHOLD: u32 = 129_600;
 /// TTL (in ledgers) that persistent entries are extended to on write.
-const TTL_EXTEND_TO: u32 = 17_280;
+///
+/// ~30 days at 5 s/ledger. The window must survive a credential being left alone:
+/// reads go through `simulateTransaction`, which does **not** persist a TTL bump,
+/// so a short window would archive credentials that are still in use. Entries that
+/// do archive can be restored, but `is_credential_valid` reports `false` until then.
+const TTL_EXTEND_TO: u32 = 518_400;
 /// Instance-storage TTL policy for the admin/issuer registry.
-const INSTANCE_TTL_THRESHOLD: u32 = 4_096;
-const INSTANCE_TTL_EXTEND_TO: u32 = 17_280;
+const INSTANCE_TTL_THRESHOLD: u32 = 129_600;
+const INSTANCE_TTL_EXTEND_TO: u32 = 518_400;
 
 // ── Contract ──────────────────────────────────────────────────────────────────
 
@@ -294,9 +299,16 @@ impl VCVerifier {
 
     /// Issuer records an attested attribute for `subject`.
     ///
+    /// A registered issuer may refresh its own attestation (renewal), but the
+    /// credential slot for `(subject, attribute)` is exclusive: one issuer cannot
+    /// take over another issuer's attestation, and a revoked credential stays
+    /// revoked for good (there is no re-issue path, by design).
+    ///
     /// # Panics
     /// * if `issuer` is not registered
     /// * if `expires_at` is not in the future
+    /// * if the slot is held by a different issuer
+    /// * if the slot holds a revoked credential
     pub fn issue_credential(
         env: Env,
         issuer: Address,
@@ -313,6 +325,22 @@ impl VCVerifier {
         let now = env.ledger().sequence();
         assert!(expires_at > now, "expires_at must be in the future");
 
+        let key = Self::cred_key(&env, &subject, &attribute);
+        if let Some(existing) = env.storage().persistent().get::<_, Credential>(&key) {
+            // Revocation must be irreversible: otherwise any registered issuer
+            // could resurrect a revoked credential by re-issuing the same slot.
+            assert!(
+                !existing.revoked,
+                "credential is revoked and cannot be re-issued"
+            );
+            // The slot is keyed by (subject, attribute) only, so without this
+            // check one issuer could silently replace another's attestation.
+            assert!(
+                existing.issuer == issuer,
+                "attribute already attested by another issuer"
+            );
+        }
+
         let credential = Credential {
             subject: subject.clone(),
             attribute: attribute.clone(),
@@ -322,7 +350,6 @@ impl VCVerifier {
             revoked: false,
         };
 
-        let key = Self::cred_key(&env, &subject, &attribute);
         env.storage().persistent().set(&key, &credential);
         env.storage()
             .persistent()
@@ -339,17 +366,18 @@ impl VCVerifier {
         credential
     }
 
-    /// Issuer (or the admin) revokes a credential.
+    /// Revoke a credential.
+    ///
+    /// Only the issuer of record (the address that attested this slot) or the
+    /// admin may revoke. Registration alone is not enough: in a multi-issuer
+    /// registry, permission to attest must not imply permission to deny another
+    /// issuer's attestations.
     ///
     /// # Panics
-    /// * if the caller is neither a registered issuer nor the admin
+    /// * if the caller is neither the credential's issuer nor the admin
     /// * if the credential does not exist or is already revoked
     pub fn revoke_credential(env: Env, caller: Address, subject: Address, attribute: Symbol) {
         caller.require_auth();
-        assert!(
-            Self::is_registered_issuer(&env, &caller) || caller == Self::admin(&env),
-            "caller may not revoke credentials"
-        );
 
         let key = Self::cred_key(&env, &subject, &attribute);
         let mut credential: Credential = env
@@ -357,6 +385,11 @@ impl VCVerifier {
             .persistent()
             .get(&key)
             .expect("credential not found");
+
+        assert!(
+            caller == credential.issuer || caller == Self::admin(&env),
+            "caller may not revoke credentials"
+        );
 
         assert!(!credential.revoked, "credential already revoked");
 
@@ -720,5 +753,99 @@ mod tests {
         let new_admin = Address::generate(&env);
         client.transfer_admin(&admin, &new_admin);
         assert_eq!(client.get_admin(), new_admin);
+    }
+
+    /// Regression for ACCEPTANCE-AUDIT.md H-1: a revoked credential used to be
+    /// resurrected by any registered issuer calling `issue_credential` again,
+    /// because that call overwrote the slot and reset `revoked` to false.
+    #[test]
+    #[should_panic(expected = "credential is revoked and cannot be re-issued")]
+    fn test_revoked_credential_cannot_be_reissued() {
+        let env = Env::default();
+        let (client, _admin, issuer) = setup(&env);
+        let subject = Address::generate(&env);
+
+        client.issue_credential(&issuer, &subject, &attr(&env), &1_000);
+        client.revoke_credential(&issuer, &subject, &attr(&env));
+        assert!(!client.is_credential_valid(&subject, &attr(&env)));
+
+        client.issue_credential(&issuer, &subject, &attr(&env), &2_000);
+    }
+
+    /// Regression for ACCEPTANCE-AUDIT.md H-1: a second registered issuer used to
+    /// be able to overwrite another issuer's attestation for the same attribute.
+    #[test]
+    #[should_panic(expected = "attribute already attested by another issuer")]
+    fn test_other_issuer_cannot_take_over_slot() {
+        let env = Env::default();
+        let (client, admin, issuer) = setup(&env);
+        let subject = Address::generate(&env);
+        let other = Address::generate(&env);
+        client.add_issuer(&admin, &other);
+
+        client.issue_credential(&issuer, &subject, &attr(&env), &1_000);
+        client.issue_credential(&other, &subject, &attr(&env), &2_000);
+    }
+
+    /// Renewal by the issuer of record must keep working, and must not clear a
+    /// revocation on any other slot.
+    #[test]
+    fn test_issuer_of_record_can_renew() {
+        let env = Env::default();
+        let (client, _admin, issuer) = setup(&env);
+        let subject = Address::generate(&env);
+
+        client.issue_credential(&issuer, &subject, &attr(&env), &1_000);
+        client.issue_credential(&issuer, &subject, &attr(&env), &5_000);
+
+        let credential = client.get_credential(&subject, &attr(&env)).unwrap();
+        assert_eq!(credential.issuer, issuer);
+        assert_eq!(credential.expires_at, 5_000);
+        assert!(!credential.revoked);
+    }
+
+    /// Regression for ACCEPTANCE-AUDIT.md M-2: an unrelated registered issuer
+    /// used to be able to revoke another issuer's credential.
+    #[test]
+    #[should_panic(expected = "caller may not revoke credentials")]
+    fn test_other_issuer_cannot_revoke() {
+        let env = Env::default();
+        let (client, admin, issuer) = setup(&env);
+        let subject = Address::generate(&env);
+        let other = Address::generate(&env);
+        client.add_issuer(&admin, &other);
+
+        client.issue_credential(&issuer, &subject, &attr(&env), &1_000);
+        client.revoke_credential(&other, &subject, &attr(&env));
+    }
+
+    /// Regression for ACCEPTANCE-AUDIT.md H-5: writing a credential must extend
+    /// its persistent entry well past the 24 h window that used to archive live
+    /// credentials. This reads the real entry TTL from the host rather than
+    /// re-asserting the constants (which clippy correctly flags as tautological).
+    #[test]
+    fn test_issue_credential_extends_storage_ttl() {
+        use soroban_sdk::testutils::storage::Persistent;
+
+        let env = Env::default();
+        set_ledger(&env, 100);
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VCVerifier);
+        let client = VCVerifierClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        client.initialize(&admin);
+        client.add_issuer(&admin, &issuer);
+
+        let subject = Address::generate(&env);
+        client.issue_credential(&issuer, &subject, &attr(&env), &1_000);
+
+        let key = (Symbol::new(&env, CRED_PREFIX), subject, attr(&env));
+        let remaining = env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+        assert!(
+            remaining > 17_280,
+            "credential TTL must outlive the old 24h window, got {remaining}"
+        );
     }
 }

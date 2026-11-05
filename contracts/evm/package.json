@@ -1,0 +1,24 @@
+{
+  "name": "@stellar-did/attestation-receiver",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "EVM destination for compliance attestations relayed from Stellar",
+  "scripts": {
+    "build": "hardhat compile",
+    "test": "hardhat test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "5.0.2"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-chai-matchers": "^2.0.8",
+    "@nomicfoundation/hardhat-ethers": "^3.0.8",
+    "chai": "^4.5.0",
+    "ethers": "^6.13.4",
+    "hardhat": "^2.29.0"
+  }
+}

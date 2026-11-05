@@ -5,17 +5,24 @@
  * an EVM chain.
  *
  * # Signing scheme (integrator contract — read this)
- * The relayer signs an EIP-191 prefixed digest:
+ * The subject is a **Stellar** identifier (`did:stellar:` controller / strkey), so
+ * it is carried as a string: no Stellar address is a valid EVM address, and an
+ * earlier version rejected every attestation because it required
+ * `ethers.isAddress(subject)`. The destination must map the Stellar identifier to
+ * whatever EVM-side account or allowlist entry it trusts.
  *
- *   digest = keccak256(abi.encodePacked(
- *              subject, policy, compliant, ledger, nonce, chainId))
+ *   digest = keccak256(abi.encode(
+ *              receiver, subject, policy, compliant, ledger, nonce, chainId))
  *   signature = personal_sign(digest)
  *
- * `nonce` is the unique Stellar event id (keccak256 of it), so a destination
- * contract can reject replays by tracking consumed nonces. The destination MUST
- * verify the signature against an allowlisted relayer and MUST store the nonce.
- * That contract does not exist in this repository yet (AUDIT.md H-9), so this
- * path has never been exercised end to end.
+ * The encoding is **non-packed**: `abi.encodePacked` with two adjacent dynamic
+ * strings is ambiguous and would let a signature be re-split into a different
+ * `(subject, policy)` pair. `receiver` and `chainId` bind the signature to one
+ * deployment and network; `nonce` (keccak256 of the Stellar event id) lets the
+ * destination reject replays.
+ *
+ * This matches `contracts/evm/contracts/AttestationReceiver.sol`. That contract
+ * must allowlist this relayer's signer address before a relay succeeds.
  *
  * The previous implementation sent the literal bytes "stub-signature" and
  * reported reverted transactions as successes.
@@ -27,9 +34,12 @@ const { ethers } = require("ethers");
 
 // Interface implemented by the (not yet written) AttestationReceiver.
 const RECEIVER_ABI = [
-  "function receiveAttestation(address subject, string policy, bool compliant, bytes32 nonce, bytes signature) external",
+  "function receiveAttestation(string subject, string policy, bool compliant, uint256 ledger, bytes32 nonce, bytes signature) external",
   "function consumedNonce(bytes32 nonce) view returns (bool)",
 ];
+
+/** Stellar account (`G...`) or contract (`C...`) strkey. */
+const STELLAR_ADDRESS_RE = /^[GC][A-Z2-7]{55}$/;
 
 class EVMRelayer {
   /**
@@ -42,6 +52,7 @@ class EVMRelayer {
    */
   constructor({ rpcUrl, receiverAddress, privateKey, contract, wallet } = {}) {
     this.enabled = false;
+    this.receiverAddress = receiverAddress;
 
     if (contract && wallet) {
       this.contract = contract;
@@ -76,8 +87,8 @@ class EVMRelayer {
 
     const { id, subject, policy, compliant, ledger } = attestation || {};
     if (!id) throw new Error("attestation.id is required");
-    if (typeof subject !== "string" || !ethers.isAddress(subject)) {
-      throw new Error("attestation.subject must be a valid EVM address");
+    if (typeof subject !== "string" || !STELLAR_ADDRESS_RE.test(subject)) {
+      throw new Error("attestation.subject must be a Stellar address");
     }
     if (typeof policy !== "string" || policy.length === 0) {
       throw new Error("attestation.policy is required");
@@ -85,14 +96,44 @@ class EVMRelayer {
     if (typeof compliant !== "boolean") {
       throw new Error("attestation.compliant must be a boolean");
     }
+    if (ledger === undefined || ledger === null) {
+      throw new Error("attestation.ledger is required");
+    }
+    let ledgerValue;
+    try {
+      ledgerValue = BigInt(ledger);
+    } catch {
+      throw new Error("attestation.ledger must be an integer");
+    }
+    if (ledgerValue < 0n) throw new Error("attestation.ledger must not be negative");
 
-    const network = await this.contract.runner?.provider?.getNetwork?.();
-    const chainId = network?.chainId ?? 0;
+    const receiver = this.contract.target ?? this.receiverAddress;
+    if (typeof receiver !== "string" || !ethers.isAddress(receiver)) {
+      throw new Error("cannot determine receiver address; refusing to sign");
+    }
+
+    // Fail closed: signing with a defaulted chain id produced a payload that is
+    // either rejected downstream or replayable across chains (ACCEPTANCE-AUDIT.md M-3).
+    // Ethers v6 reports `chainId` as a bigint, so it must not be checked with
+    // `Number.isInteger`.
+    const network = await this._resolveNetwork();
+    let chainId;
+    try {
+      chainId = BigInt(network?.chainId);
+    } catch {
+      chainId = 0n;
+    }
+    if (chainId <= 0n) {
+      throw new Error("cannot determine EVM chain id; refusing to sign an attestation");
+    }
 
     const nonce = ethers.keccak256(ethers.toUtf8Bytes(String(id)));
-    const digest = ethers.solidityPackedKeccak256(
-      ["address", "string", "bool", "uint256", "bytes32", "uint256"],
-      [subject, policy, compliant, BigInt(ledger ?? 0), nonce, chainId]
+    // Non-packed: see the ambiguity note in the header comment.
+    const digest = ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(
+        ["address", "string", "string", "bool", "uint256", "bytes32", "uint256"],
+        [receiver, subject, policy, compliant, ledgerValue, nonce, chainId]
+      )
     );
     const signature = await this.wallet.signMessage(ethers.getBytes(digest));
 
@@ -100,6 +141,7 @@ class EVMRelayer {
       subject,
       policy,
       compliant,
+      ledgerValue,
       nonce,
       signature
     );
@@ -114,6 +156,25 @@ class EVMRelayer {
     }
 
     return tx.hash;
+  }
+
+  /**
+   * Resolve the chain id from the contract's signer, its provider, or the
+   * relayer's own provider. Returns null when none is available.
+   */
+  async _resolveNetwork() {
+    const runner = this.contract.runner;
+    if (typeof runner?.getNetwork === "function") {
+      try {
+        const network = await runner.getNetwork();
+        if (network && network.chainId !== undefined) return network;
+      } catch {
+        // Fall through to the provider.
+      }
+    }
+    const provider = runner?.provider ?? this.provider;
+    if (typeof provider?.getNetwork === "function") return provider.getNetwork();
+    return null;
   }
 }
 

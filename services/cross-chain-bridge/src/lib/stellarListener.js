@@ -81,11 +81,25 @@ class StellarListener extends EventEmitter {
         if (!parsed) continue;
         if (this._processedIds.includes(parsed.id)) continue;
 
+        try {
+          await this._dispatch(parsed);
+        } catch (err) {
+          // The handler did not confirm delivery, so this event is deliberately left
+          // unprocessed and the cursor stays on the last successfully relayed event:
+          // the next poll re-reads it. Ids relayed earlier in this batch are already
+          // in _processedIds, so they are skipped rather than relayed twice.
+          // (ACCEPTANCE-AUDIT.md H-2 — the cursor used to advance before the relay.)
+          this._saveState();
+          this.emit("pollError", err);
+          return;
+        }
+
         this._processedIds.push(parsed.id);
         if (this._processedIds.length > MAX_PROCESSED_IDS) this._processedIds.shift();
-        this._cursor = event.id;
-
-        this.emit("attestation", parsed);
+        // `cursor` is a paging token, not an event id: the SDK documents setting
+        // `cursor` from `pagingToken`. Using `id` happened to work only when the
+        // two strings are identical (ACCEPTANCE-AUDIT.md M-4 follow-up).
+        this._cursor = parsed.pagingToken;
       }
 
       if (response.cursor) this._cursor = response.cursor;
@@ -102,13 +116,35 @@ class StellarListener extends EventEmitter {
     }
   }
 
+  /**
+   * Run the `attestation` handlers and wait for delivery confirmation.
+   *
+   * `emit` is synchronous and discards what a listener returns, which is how a
+   * failed relay used to look like a success. Handlers are therefore invoked
+   * directly and their promises awaited; a rejecting handler aborts the batch.
+   * `once` listeners are not supported for this event (they would not self-remove).
+   */
+  async _dispatch(attestation) {
+    const handlers = this.listeners("attestation");
+    if (handlers.length === 0) {
+      throw new Error("no attestation handler registered; refusing to acknowledge event");
+    }
+    for (const handler of handlers) {
+      const result = handler.call(this, attestation);
+      if (result && typeof result.then === "function") await result;
+    }
+  }
+
   async _requestParams() {
     const base = {
       filters: [
         {
           type: "contract",
           contractIds: [this.contractId],
-          topics: [[toScValString(TOPIC_NAMESPACE), toScValString(TOPIC_ATTESTATION)]],
+          // One array per topic position: position 0 must be `compliance`, position 1
+          // must be `attestation`. A single array would match either symbol in
+          // position 0 (ACCEPTANCE-AUDIT.md M-4).
+          topics: [[toScValString(TOPIC_NAMESPACE)], [toScValString(TOPIC_ATTESTATION)]],
         },
       ],
       limit: 50,
@@ -135,6 +171,10 @@ class StellarListener extends EventEmitter {
     if (event.contractId !== this.contractId) return null;
     if (!Array.isArray(event.topic) || event.topic.length < 2) return null;
     if (!event.id) return null;
+    // Events emitted by a contract call that reverted are not ledger state. The
+    // RPC surfaces them with `inSuccessfulContractCall: false`; relaying one would
+    // assert compliance from a transaction that failed (ACCEPTANCE-AUDIT.md C-10).
+    if (event.inSuccessfulContractCall === false) return null;
 
     let topics;
     let value;
@@ -157,6 +197,8 @@ class StellarListener extends EventEmitter {
 
     return {
       id: event.id,
+      // Paging cursor for this event; `getEvents` accepts it as `cursor`.
+      pagingToken: event.pagingToken || event.id,
       subject,
       policy,
       compliant,

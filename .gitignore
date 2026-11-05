@@ -8,6 +8,11 @@ dist/
 # Soroban test snapshots (generated, not source)
 test_snapshots/
 
+# Hardhat build output
+contracts/evm/artifacts/
+contracts/evm/cache/
+contracts/evm/typechain-types/
+
 # Cross-chain bridge cursor state
 .bridge-cursor.json
 

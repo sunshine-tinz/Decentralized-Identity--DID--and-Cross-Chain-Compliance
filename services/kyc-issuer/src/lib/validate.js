@@ -7,6 +7,8 @@
 
 "use strict";
 
+const { StrKey } = require("@stellar/stellar-sdk");
+
 const HEX_PUBKEY_RE = /^[0-9a-fA-F]{192}$/;
 const USER_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const SYMBOL_RE = /^[a-z][a-z0-9_]{0,31}$/;
@@ -57,10 +59,15 @@ function isPlainObject(value) {
 function validateKycRequest(body) {
   if (!isPlainObject(body)) return { ok: false, error: "Invalid request body" };
 
-  const { userId, issuerPubkey, attributes, personalInfo, documentPhoto } = body;
+  const { userId, subject, issuerPubkey, attributes, personalInfo, documentPhoto } = body;
 
   if (typeof userId !== "string" || !USER_ID_RE.test(userId)) {
     return { ok: false, error: "Invalid userId" };
+  }
+  // The on-chain credential is keyed by a Stellar address, so the submission
+  // must name the subject account rather than only an opaque userId.
+  if (typeof subject !== "string" || !StrKey.isValidEd25519PublicKey(subject)) {
+    return { ok: false, error: "Invalid subject address" };
   }
   if (typeof issuerPubkey !== "string" || !HEX_PUBKEY_RE.test(issuerPubkey)) {
     return { ok: false, error: "Invalid issuerPubkey" };
@@ -109,6 +116,7 @@ function validateKycRequest(body) {
     ok: true,
     value: {
       userId,
+      subject,
       issuerPubkey: issuerPubkey.toLowerCase(),
       attributes: [...unique],
       personalInfo: personalInfo || {},

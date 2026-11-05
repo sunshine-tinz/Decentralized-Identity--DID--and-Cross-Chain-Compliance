@@ -24,10 +24,15 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Str
 
 const DID_PREFIX: &str = "DID";
 
-/// Minimum remaining TTL before a persistent entry is extended.
-const TTL_THRESHOLD: u32 = 4_096;
+/// Minimum remaining TTL before a persistent entry is extended (~7.5 days at 5 s/ledger).
+const TTL_THRESHOLD: u32 = 129_600;
 /// TTL (in ledgers) that entries are extended to on write.
-const TTL_EXTEND_TO: u32 = 17_280;
+///
+/// ~30 days at 5 s/ledger. `resolve` goes through `simulateTransaction`, which does
+/// not persist a TTL bump, so a short window would archive DIDs that are actively
+/// resolved but never updated (ACCEPTANCE-AUDIT.md H-5). An archived entry fails to
+/// resolve until it is restored. Keep this in step with `vc_verifier`.
+const TTL_EXTEND_TO: u32 = 518_400;
 
 /// Upper bound on the anchored document hash: accepts a 32-byte SHA-256 digest
 /// or a longer content identifier (e.g. IPFS CID bytes), but rejects empty input.
@@ -325,5 +330,26 @@ mod tests {
         client.register(&controller, &hash(&env));
         client.deactivate(&controller);
         client.deactivate(&controller);
+    }
+
+    /// Regression for ACCEPTANCE-AUDIT.md H-5: a DID that is registered and then
+    /// only read must not archive after the old ~24 h window.
+    #[test]
+    fn test_register_extends_storage_ttl() {
+        use soroban_sdk::testutils::storage::Persistent;
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, DIDRegistry);
+        let client = DIDRegistryClient::new(&env, &contract_id);
+        let controller = Address::generate(&env);
+        client.register(&controller, &hash(&env));
+
+        let key = (Symbol::new(&env, DID_PREFIX), controller);
+        let remaining = env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+        assert!(
+            remaining > 17_280,
+            "DID TTL must outlive the old 24h window, got {remaining}"
+        );
     }
 }

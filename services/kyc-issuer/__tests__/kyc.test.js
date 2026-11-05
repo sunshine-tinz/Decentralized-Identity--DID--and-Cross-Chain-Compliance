@@ -1,12 +1,22 @@
 "use strict";
 
 const request = require("supertest");
+const { Keypair } = require("@stellar/stellar-sdk");
 const app = require("../src/index");
 const store = require("../src/store");
+
+jest.mock("../src/lib/chain", () => ({
+  loadChainConfig: jest.fn(),
+  issueCredential: jest.fn(),
+  credentialExpiryLedger: jest.fn(),
+}));
+
+const chain = require("../src/lib/chain");
 
 const ISSUER_KEY = "test-issuer-key";
 const ISSUER_PUBKEY = "a".repeat(192);
 const OTHER_PUBKEY = "b".repeat(192);
+const SUBJECT = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 7)).publicKey();
 
 beforeEach(() => {
   store.kycRequests.clear();
@@ -14,6 +24,12 @@ beforeEach(() => {
   process.env.ISSUER_KEYS = `${ISSUER_KEY}:${ISSUER_PUBKEY}`;
   process.env.PLACEHOLDER_ISSUANCE_ENABLED = "true";
   delete process.env.ALLOWED_ATTRIBUTES;
+
+  // Default: no chain configuration, placeholder mode enabled.
+  chain.loadChainConfig.mockReset();
+  chain.loadChainConfig.mockReturnValue(null);
+  chain.issueCredential.mockReset();
+  chain.credentialExpiryLedger.mockReset();
 });
 
 afterEach(() => {
@@ -27,6 +43,7 @@ function submit(overrides = {}) {
     .post("/api/kyc/request")
     .send({
       userId: "user-1",
+      subject: SUBJECT,
       issuerPubkey: ISSUER_PUBKEY,
       attributes: ["kyc_passed"],
       personalInfo: { name: "Alice", email_address: "alice@example.com" },
@@ -85,6 +102,19 @@ describe("POST /api/kyc/request", () => {
   it("rejects an unsafe userId", async () => {
     const res = await submit({ userId: "../../etc/passwd" });
     expect(res.status).toBe(400);
+  });
+
+  it("requires a valid Stellar subject address", async () => {
+    const missing = await request(app).post("/api/kyc/request").send({
+      userId: "user-1",
+      issuerPubkey: ISSUER_PUBKEY,
+      attributes: ["kyc_passed"],
+    });
+    expect(missing.status).toBe(400);
+
+    const invalid = await submit({ subject: "not-an-address" });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.error).toMatch(/subject/);
   });
 
   it("rejects an oversized document", async () => {
@@ -220,7 +250,7 @@ describe("POST /api/issuer/approve", () => {
     expect(res.status).toBe(403);
   });
 
-  it("fails closed when placeholder issuance is disabled", async () => {
+  it("fails closed with 503 when neither chain nor placeholder is configured", async () => {
     const { body } = await submit();
     delete process.env.PLACEHOLDER_ISSUANCE_ENABLED;
 
@@ -228,7 +258,7 @@ describe("POST /api/issuer/approve", () => {
       .post("/api/issuer/approve")
       .set("x-issuer-key", ISSUER_KEY)
       .send({ requestId: body.requestId });
-    expect(res.status).toBe(501);
+    expect(res.status).toBe(503);
   });
 
   it("cannot be approved twice", async () => {
@@ -291,6 +321,85 @@ describe("POST /api/issuer/reject", () => {
       .set("x-issuer-key", ISSUER_KEY)
       .send({ requestId, reason: "changed my mind" });
     expect(res.status).toBe(409);
+  });
+});
+
+describe("on-chain issuance", () => {
+  const CHAIN = {
+    contractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+    address: SUBJECT,
+    keypair: { publicKey: () => SUBJECT },
+    ttlLedgers: 518_400,
+  };
+
+  beforeEach(() => {
+    chain.loadChainConfig.mockReturnValue(CHAIN);
+    chain.credentialExpiryLedger.mockResolvedValue(9_000);
+    chain.issueCredential.mockResolvedValue({ hash: "deadbeef", ledger: 500 });
+  });
+
+  function approve(requestId) {
+    return request(app)
+      .post("/api/issuer/approve")
+      .set("x-issuer-key", ISSUER_KEY)
+      .send({ requestId });
+  }
+
+  it("submits one issue_credential call per attribute and returns the hashes", async () => {
+    const { body } = await submit({ attributes: ["kyc_passed", "over_18"] });
+    const res = await approve(body.requestId);
+
+    expect(res.status).toBe(200);
+    expect(res.body.onChain).toBe(true);
+    expect(res.body.expiresAtLedger).toBe(9_000);
+    expect(res.body.transactions).toEqual([
+      { attribute: "kyc_passed", hash: "deadbeef" },
+      { attribute: "over_18", hash: "deadbeef" },
+    ]);
+
+    expect(chain.issueCredential).toHaveBeenCalledTimes(2);
+    expect(chain.issueCredential).toHaveBeenNthCalledWith(1, CHAIN, {
+      subject: SUBJECT,
+      attribute: "kyc_passed",
+      expiresAt: 9_000,
+    });
+
+    const credential = await request(app).get(
+      `/api/kyc/credential/${body.retrievalToken}`
+    );
+    expect(credential.status).toBe(200);
+    expect(credential.body.scheme).toBe("issuer-attested-soroban");
+    expect(credential.body.verifiable).toBe(true);
+    expect(credential.body.subject).toBe(SUBJECT);
+    expect(credential.body.transactions).toHaveLength(2);
+  });
+
+  it("leaves the request pending and hides internals when the chain call fails", async () => {
+    const { body } = await submit();
+    chain.issueCredential.mockRejectedValue(new Error("host trap: secret detail"));
+
+    const res = await approve(body.requestId);
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).not.toMatch(/secret detail/);
+
+    const status = await request(app).get(`/api/kyc/status/${body.requestId}`);
+    expect(status.body.status).toBe("pending");
+
+    // No credential was stored.
+    const credential = await request(app).get(
+      `/api/kyc/credential/${body.retrievalToken}`
+    );
+    expect(credential.status).toBe(404);
+  });
+
+  it("does not submit anything when the request is not pending", async () => {
+    const { requestId } = await approvedRequest();
+    chain.issueCredential.mockClear();
+
+    const res = await approve(requestId);
+    expect(res.status).toBe(409);
+    expect(chain.issueCredential).not.toHaveBeenCalled();
   });
 });
 

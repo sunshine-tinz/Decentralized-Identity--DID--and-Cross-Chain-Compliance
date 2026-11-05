@@ -18,15 +18,15 @@ before relying on anything here.
 | DID register / update / deactivate / resolve | **Implemented and unit-tested** (`did:stellar:<address>`) |
 | Issuer-attested credentials with expiry and revocation | **Implemented and unit-tested** |
 | Compliance policy evaluation (cross-contract) | **Implemented and unit-tested** |
-| KYC issuer service (validate, review, one-time retrieval) | **Implemented, authenticated, unit-tested** |
+| KYC issuer service (validate, review, one-time retrieval) | **Implemented, authenticated, unit-tested; approval submits `issue_credential` when the chain env is configured** |
 | Soroban→EVM event listener (decode, validate, dedupe) | **Implemented and unit-tested** |
-| EVM relayer signing + receipt verification | **Implemented; destination contract does not exist yet** |
+| EVM relayer signing + receipt verification | **Implemented; `AttestationReceiver` added and tested locally (not deployed)** |
 | SDK reads (resolve, credential validity, compliance, policy) | **Implemented and unit-tested** |
 | SDK writes | Builds and prepares **unsigned** transactions for the caller to sign |
 | **BLS12-381 ring signatures / anonymity** | **Not implemented — disabled and fails closed** |
 | **SEP-10 / SEP-12 / SEP-45** | **Not implemented** |
 | **Frontend features** | **Placeholder pages only** |
-| End-to-end Testnet run | **Not performed** (no funded accounts, RPC access or deployed contracts) |
+| End-to-end Testnet run | **Not captured** — a deployable WASM target and the KYC contract call exist, but no transaction evidence is committed |
 
 ### About the ring-signature feature
 
@@ -51,18 +51,27 @@ review. See `AUDIT.md` (C-2, C-3).
    identifier is derived from the controller address: `did:stellar:<strkey>`.
 2. **Verify** — submit KYC documents to a trusted issuer off-chain
    (`POST /api/kyc/request`). The response includes a one-time retrieval token.
-3. **Issue** — an authenticated issuer approves the request; the credential is
-   recorded on-chain via `VCVerifier.issue_credential` with an explicit expiry.
-   *(The service's local credential builder is a placeholder and is disabled
-   unless explicitly enabled — it does not produce verifiable BLS credentials.)*
+3. **Issue** — an authenticated issuer approves the request. When
+   `SOROBAN_RPC_URL`, `NETWORK_PASSPHRASE`, `VC_VERIFIER_CONTRACT_ID` and
+   `ISSUER_SECRET_KEY` are set (see `services/kyc-issuer/.env.example`), approval
+   submits one `VCVerifier.issue_credential` transaction per requested attribute
+   and returns the transaction hashes. Without that configuration it returns
+   `503` and writes nothing on-chain. The separate local credential builder is a
+   placeholder that is disabled unless explicitly enabled (it does not produce
+   verifiable BLS credentials).
 4. **Comply** — `ComplianceEngine.is_compliant` evaluates the policy live by
    querying the verifier for every required attribute. There is no stored
    "compliant" flag that anyone can set.
 5. **Bridge** — `ComplianceEngine.export_attestation` emits an event; the bridge
-   decodes it, signs an EIP-191 digest and submits it to an EVM receiver.
+   decodes it, signs an EIP-191 digest and submits it to an EVM receiver. The
+   subject is a Stellar identifier carried as a string, because no Stellar
+   address is a valid EVM address; the receiver must map it.
 
-Step 5 is **incomplete**: the destination `AttestationReceiver` contract is not
-in this repository, so the relay has never run end to end.
+`contracts/evm` contains the destination `AttestationReceiver` (relayer
+allowlist, per-subject nonce replay protection, chain-id check, EIP-191
+signature verification). It is covered by Hardhat tests and a cross-language
+test against the real JS relayer, but it has **not been deployed** and the relay
+has not run end to end.
 
 ---
 
@@ -98,7 +107,7 @@ cd contracts
 cargo fmt --all -- --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
-cargo build --target wasm32-unknown-unknown --release --locked
+cargo build --target wasm32v1-none --release --locked  # wasm32-unknown-unknown is rejected by the Soroban VM
 
 # KYC issuer service
 cd ../services/kyc-issuer

@@ -4,10 +4,10 @@
  * Issuers review pending KYC requests and approve/reject them.
  *
  * TODO for contributors:
- *  1. Connect Freighter wallet (issuer address)
- *  2. Poll GET /api/issuer/requests?issuerPubkey=<key> every 5s
- *  3. Display request cards with document thumbnails
- *  4. On approve: POST /api/issuer/approve (triggers on-chain ring creation)
+ *  1. Obtain the issuer API key out of band (routes require `x-issuer-key`)
+ *  2. Poll GET /api/issuer/requests every 5s with that header
+ *  3. Display request cards (the listing is redacted; it has no document URLs)
+ *  4. On approve: POST /api/issuer/approve (local placeholder only — no on-chain call)
  *  5. On reject: POST /api/issuer/reject with reason
  */
 
@@ -26,7 +26,7 @@ export default function IssuerPage() {
   useEffect(() => {
     // TODO: replace with real polling using issuer pubkey from wallet
     const interval = setInterval(() => {
-      // fetch("/api/issuer/requests?issuerPubkey=...").then(...)
+      // fetch("/api/issuer/requests", { headers: { "x-issuer-key": key } }).then(...)
     }, 5000);
     return () => clearInterval(interval);
   }, []);

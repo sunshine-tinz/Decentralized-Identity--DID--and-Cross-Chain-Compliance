@@ -2,6 +2,7 @@
   "name": "@stellar-did/cross-chain-bridge",
   "version": "0.1.0",
   "description": "Relays compliance attestations from Stellar to EVM chains",
+  "license": "MIT",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",

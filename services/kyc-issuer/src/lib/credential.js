@@ -90,6 +90,7 @@ async function buildCredential(kycReq) {
     verifiable: false,
     issuerPubkey: kycReq.issuerPubkey,
     userId: kycReq.userId,
+    subject: kycReq.subject,
     attributeKeys,
     attributeRings,
     issuedAt,

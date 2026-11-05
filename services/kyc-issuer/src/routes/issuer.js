@@ -9,9 +9,13 @@
  * key is resolved server-side from that key, so a caller cannot act as an issuer
  * by quoting a public key. No private key material is accepted over HTTP.
  *
- * Storage remains in-memory (see store.js) and there is no on-chain call yet: the
- * verifier cannot check BLS proofs (AUDIT.md C-2/C-3), so issuance is disabled
- * unless PLACEHOLDER_ISSUANCE_ENABLED=true.
+ * Approval submits `VCVerifier.issue_credential` for every requested attribute
+ * using the server-held issuer key. If chain configuration is absent, issuance
+ * fails closed with 503 unless PLACEHOLDER_ISSUANCE_ENABLED=true, in which case
+ * the local, explicitly non-verifiable placeholder is produced instead (for
+ * plumbing tests only).
+ *
+ * Storage remains in-memory (see store.js).
  */
 
 "use strict";
@@ -21,6 +25,11 @@ const store = require("../store");
 const { buildCredential } = require("../lib/credential");
 const { requireIssuer } = require("../lib/auth");
 const { validateReason } = require("../lib/validate");
+const {
+  loadChainConfig,
+  issueCredential,
+  credentialExpiryLedger,
+} = require("../lib/chain");
 
 const router = Router();
 
@@ -35,6 +44,7 @@ function toReviewView(request) {
   return {
     requestId: request.requestId,
     userId: request.userId,
+    subject: request.subject,
     attributes: request.attributes,
     status: request.status,
     createdAt: request.createdAt,
@@ -66,13 +76,6 @@ router.post("/approve", async (req, res) => {
     return res.status(400).json({ error: "requestId required" });
   }
 
-  if (process.env.PLACEHOLDER_ISSUANCE_ENABLED !== "true") {
-    return res.status(501).json({
-      error:
-        "Credential issuance is not available: BLS12-381 ring credentials are not implemented",
-    });
-  }
-
   const kycReq = store.kycRequests.get(requestId);
   if (!kycReq) return res.status(404).json({ error: "Request not found" });
 
@@ -86,6 +89,57 @@ router.post("/approve", async (req, res) => {
     return res.status(409).json({ error: `Request is already ${kycReq.status}` });
   }
 
+  const chain = loadChainConfig();
+  const placeholderEnabled = process.env.PLACEHOLDER_ISSUANCE_ENABLED === "true";
+  if (!chain && !placeholderEnabled) {
+    return res.status(503).json({ error: "Credential issuance is not configured" });
+  }
+
+  if (chain) {
+    // One transaction per attribute: the contract issues a single credential per
+    // call. If a later attribute fails, earlier ones are already on-chain; the
+    // request stays pending and a retry is safe because the issuer of record may
+    // refresh its own attestation.
+    let expiresAtLedger;
+    const transactions = [];
+    try {
+      expiresAtLedger = await credentialExpiryLedger(chain);
+      for (const attribute of kycReq.attributes) {
+        const { hash } = await issueCredential(chain, {
+          subject: kycReq.subject,
+          attribute,
+          expiresAt: expiresAtLedger,
+        });
+        transactions.push({ attribute, hash });
+      }
+    } catch (err) {
+      console.error("On-chain issuance failed:", err.message);
+      return res.status(502).json({ error: "On-chain credential issuance failed" });
+    }
+
+    kycReq.status = "approved";
+    kycReq.decidedAt = Date.now();
+
+    store.issuedCredentials.set(kycReq.retrievalToken, {
+      scheme: "issuer-attested-soroban",
+      verifiable: true,
+      contractId: chain.contractId,
+      issuer: chain.address,
+      subject: kycReq.subject,
+      attributes: kycReq.attributes,
+      expiresAtLedger,
+      transactions,
+    });
+
+    return res.json({
+      success: true,
+      onChain: true,
+      attributeCount: kycReq.attributes.length,
+      expiresAtLedger,
+      transactions,
+    });
+  }
+
   try {
     const credential = await buildCredential(kycReq);
     kycReq.status = "approved";
@@ -93,7 +147,7 @@ router.post("/approve", async (req, res) => {
 
     store.issuedCredentials.set(kycReq.retrievalToken, credential);
 
-    return res.json({ success: true, attributeCount: kycReq.attributes.length });
+    return res.json({ success: true, onChain: false, attributeCount: kycReq.attributes.length });
   } catch (err) {
     // Never echo internal error details to the client.
     console.error("Credential issuance failed:", err.message);

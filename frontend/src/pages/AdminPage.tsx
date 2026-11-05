@@ -6,9 +6,10 @@
  * TODO for contributors:
  *  1. Connect Freighter wallet (admin address)
  *  2. Call VCVerifier.initialize() once
- *  3. Generate BLS keypair for a new issuer
- *  4. Call VCVerifier.add_issuer() with the issuer's BLS public key
- *  5. Securely transmit the issuer's private key out-of-band
+ *  3. Obtain the issuer's Stellar address
+ *  4. Call VCVerifier.add_issuer() with that address (the contract registers
+ *     addresses, not BLS public keys)
+ *  5. Provision the issuer's API key out of band for the KYC service
  */
 
 import React, { useState } from "react";
@@ -29,15 +30,15 @@ export default function AdminPage() {
       <h2 id="admin-heading">Admin Panel</h2>
       <form onSubmit={handleAddIssuer}>
         <label>
-          Issuer BLS Public Key (hex, 192 chars)
+          Issuer Stellar address (G..., 56 chars)
           <input
             value={issuerPubkey}
             onChange={(e) => setIssuerPubkey(e.target.value)}
-            placeholder="0x..."
-            maxLength={192}
+            placeholder="G..."
+            maxLength={56}
           />
         </label>
-        <button type="submit" disabled={issuerPubkey.length !== 192}>
+        <button type="submit" disabled={issuerPubkey.length !== 56}>
           Register Issuer
         </button>
       </form>
