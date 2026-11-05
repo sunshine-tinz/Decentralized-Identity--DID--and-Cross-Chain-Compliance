@@ -8,27 +8,24 @@
  * The relayer signs an EIP-191 prefixed digest:
  *
  *   digest = keccak256(abi.encodePacked(
- *              subject, policy, compliant, ledger, nonce, chainId))
+ *              subject, policy, compliant, nonce, chainId))
  *   signature = personal_sign(digest)
  *
  * `nonce` is the unique Stellar event id (keccak256 of it), so a destination
  * contract can reject replays by tracking consumed nonces. The destination MUST
  * verify the signature against an allowlisted relayer and MUST store the nonce.
- * That contract does not exist in this repository yet (AUDIT.md H-9), so this
- * path has never been exercised end to end.
- *
- * The previous implementation sent the literal bytes "stub-signature" and
- * reported reverted transactions as successes.
+ * See `contracts/evm/AttestationReceiver.sol`.
  */
 
 "use strict";
 
 const { ethers } = require("ethers");
 
-// Interface implemented by the (not yet written) AttestationReceiver.
+// Interface implemented by AttestationReceiver (contracts/evm/AttestationReceiver.sol).
 const RECEIVER_ABI = [
   "function receiveAttestation(address subject, string policy, bool compliant, bytes32 nonce, bytes signature) external",
   "function consumedNonce(bytes32 nonce) view returns (bool)",
+  "function isCompliant(address subject, string policy) view returns (bool)",
 ];
 
 class EVMRelayer {
@@ -74,7 +71,7 @@ class EVMRelayer {
       throw new Error("EVM relayer is not configured");
     }
 
-    const { id, subject, policy, compliant, ledger } = attestation || {};
+    const { id, subject, policy, compliant } = attestation || {};
     if (!id) throw new Error("attestation.id is required");
     if (typeof subject !== "string" || !ethers.isAddress(subject)) {
       throw new Error("attestation.subject must be a valid EVM address");
@@ -88,11 +85,14 @@ class EVMRelayer {
 
     const network = await this.contract.runner?.provider?.getNetwork?.();
     const chainId = network?.chainId ?? 0;
+    const targetAddress = typeof this.contract.getAddress === "function"
+      ? await this.contract.getAddress()
+      : (this.contract.target || ethers.ZeroAddress);
 
     const nonce = ethers.keccak256(ethers.toUtf8Bytes(String(id)));
     const digest = ethers.solidityPackedKeccak256(
-      ["address", "string", "bool", "uint256", "bytes32", "uint256"],
-      [subject, policy, compliant, BigInt(ledger ?? 0), nonce, chainId]
+      ["address", "string", "bool", "bytes32", "uint256", "address"],
+      [subject, policy, compliant, nonce, chainId, targetAddress]
     );
     const signature = await this.wallet.signMessage(ethers.getBytes(digest));
 

@@ -5,15 +5,64 @@
  * there is no stored status a caller could assert.
  */
 
-import { Address } from "@stellar/stellar-sdk";
+import { Address, xdr } from "@stellar/stellar-sdk";
 import { Attestation, CompliancePolicy, StellarDIDConfig } from "../types";
-import { simulateRead, symbolArg } from "../lib/soroban";
+import {
+  buildPreparedTransaction,
+  simulateRead,
+  symbolArg,
+} from "../lib/soroban";
 
 export class ComplianceClient {
   private config: StellarDIDConfig;
 
   constructor(config: StellarDIDConfig) {
     this.config = config;
+  }
+
+  /**
+   * Admin sets the verifier contract address.
+   */
+  async setVerifier(admin: string, verifierAddress: string): Promise<string> {
+    return buildPreparedTransaction(
+      this.config,
+      this.config.complianceEngineId,
+      "set_verifier",
+      [Address.fromString(admin).toScVal(), Address.fromString(verifierAddress).toScVal()]
+    );
+  }
+
+  /**
+   * Read the configured verifier contract address.
+   */
+  async getVerifier(): Promise<string | null> {
+    const raw = (await simulateRead(
+      this.config,
+      this.config.complianceEngineId,
+      "get_verifier",
+      []
+    )) as string | null | undefined;
+    return raw ?? null;
+  }
+
+  /**
+   * Admin sets or updates a compliance policy.
+   */
+  async setPolicy(
+    admin: string,
+    name: string,
+    requiredAttributes: string[]
+  ): Promise<string> {
+    return buildPreparedTransaction(
+      this.config,
+      this.config.complianceEngineId,
+      "set_policy",
+      [
+        Address.fromString(admin).toScVal(),
+        symbolArg(name),
+        xdr.ScVal.scvVec(requiredAttributes.map((attr) => symbolArg(attr))),
+      ]
+    );
   }
 
   /**

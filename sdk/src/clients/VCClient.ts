@@ -9,9 +9,14 @@
  * pretending to work.
  */
 
-import { Address } from "@stellar/stellar-sdk";
+import { Address, nativeToScVal } from "@stellar/stellar-sdk";
 import { AttributeRing, Credential, RingSignature, StellarDIDConfig } from "../types";
-import { simulateRead, symbolArg, toHex } from "../lib/soroban";
+import {
+  buildPreparedTransaction,
+  simulateRead,
+  symbolArg,
+  toHex,
+} from "../lib/soroban";
 
 const RING_UNAVAILABLE =
   "BLS12-381 ring signatures are not available: the pinned soroban-sdk has no " +
@@ -23,6 +28,85 @@ export class VCClient {
 
   constructor(config: StellarDIDConfig) {
     this.config = config;
+  }
+
+  /**
+   * Admin registers a trusted issuer address.
+   */
+  async addIssuer(admin: string, issuer: string): Promise<string> {
+    return buildPreparedTransaction(
+      this.config,
+      this.config.vcVerifierId,
+      "add_issuer",
+      [Address.fromString(admin).toScVal(), Address.fromString(issuer).toScVal()]
+    );
+  }
+
+  /**
+   * Admin de-registers an issuer address.
+   */
+  async removeIssuer(admin: string, issuer: string): Promise<string> {
+    return buildPreparedTransaction(
+      this.config,
+      this.config.vcVerifierId,
+      "remove_issuer",
+      [Address.fromString(admin).toScVal(), Address.fromString(issuer).toScVal()]
+    );
+  }
+
+  /**
+   * Returns registered issuer addresses.
+   */
+  async getIssuers(): Promise<string[]> {
+    const raw = (await simulateRead(
+      this.config,
+      this.config.vcVerifierId,
+      "get_issuers",
+      []
+    )) as string[];
+    return raw ?? [];
+  }
+
+  /**
+   * Issuer records an attested credential for subject.
+   */
+  async issueCredential(
+    issuer: string,
+    subject: string,
+    attribute: string,
+    expiresAt: number
+  ): Promise<string> {
+    return buildPreparedTransaction(
+      this.config,
+      this.config.vcVerifierId,
+      "issue_credential",
+      [
+        Address.fromString(issuer).toScVal(),
+        Address.fromString(subject).toScVal(),
+        symbolArg(attribute),
+        nativeToScVal(expiresAt, { type: "u32" }),
+      ]
+    );
+  }
+
+  /**
+   * Revoke an issued credential.
+   */
+  async revokeCredential(
+    caller: string,
+    subject: string,
+    attribute: string
+  ): Promise<string> {
+    return buildPreparedTransaction(
+      this.config,
+      this.config.vcVerifierId,
+      "revoke_credential",
+      [
+        Address.fromString(caller).toScVal(),
+        Address.fromString(subject).toScVal(),
+        symbolArg(attribute),
+      ]
+    );
   }
 
   /**

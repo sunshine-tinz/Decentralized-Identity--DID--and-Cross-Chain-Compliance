@@ -1,0 +1,65 @@
+{
+  "network": "Stellar Testnet",
+  "contracts": {
+    "did_registry": {
+      "contractId": "CBX5VXEPKBQUIZJN7CPBPSEQLVAVT2DWDLBYG67GZJSKCPOBFZHP3LDG",
+      "txHash": "43c782025e1dd402201f92f2c0a08a52365e75fac0c99221cbbdec622419ffc4",
+      "ledger": 5567594,
+      "status": "SUCCESS"
+    },
+    "vc_verifier": {
+      "contractId": "CCRAPRZM3I2A2AUSU4Z5LGBQEUSMO5L7YPP7ZHUNS2HAVVQP746DSQS7",
+      "txHash": "b99b76835018b36cd516da77a6856b73535298fdc4b90cd5212056ea478adc36",
+      "ledger": 5567597,
+      "status": "SUCCESS"
+    },
+    "compliance_engine": {
+      "contractId": "CBDDV2XOANTNJRZQ6KRD2RUMHS2WF3X77ZX5FIXCKO4I6B2B767OEE22",
+      "txHash": "12e4bc61876f8c975b47ede0ba1b2a938a507c5e5c10df4b6032d4fb4b081236",
+      "ledger": 5567600,
+      "status": "SUCCESS"
+    }
+  },
+  "invocations": {
+    "vc_init": {
+      "txHash": "e2c000bb3da45877fdbfe78278cc3e77392f469eb4a41040d370cc921b7cda7f",
+      "ledger": 5567602,
+      "status": "SUCCESS"
+    },
+    "comp_init": {
+      "txHash": "6d9dcbad287184d36135d26814b321953f862363892e740acc99792f315ee623",
+      "ledger": 5567604,
+      "status": "SUCCESS"
+    },
+    "set_verifier": {
+      "txHash": "1d34d86428999533e975c2eebdbdec38da5449aabc8c8e35338a761752697de9",
+      "ledger": 5567608,
+      "status": "SUCCESS"
+    },
+    "register_did": {
+      "txHash": "9463ca6bcf66651c0af860f8dafe9a63ae540192220b983856f7f8003df55b7e",
+      "ledger": 5567610,
+      "status": "SUCCESS"
+    },
+    "add_issuer": {
+      "txHash": "88e51be009223ebc048eb1cd78a3dad99125795762213519a191b0ccc6ac3e97",
+      "ledger": 5567613,
+      "status": "SUCCESS"
+    },
+    "issue_credential": {
+      "txHash": "73830b10d44c15f81209484d3323291522537bbf1923f24d64cd5aa2caec2487",
+      "ledger": 5567616,
+      "status": "SUCCESS"
+    },
+    "set_policy": {
+      "txHash": "d8fe150bbb357fc9088eb5e5485adf40ea72e156ade6f3dfdb8f5245131e0324",
+      "ledger": 5567620,
+      "status": "SUCCESS"
+    },
+    "revoke_credential": {
+      "txHash": "0e18a42cb00b2cd51db54e05b0c3251fd45009b7db468b0be50184f26538d7d4",
+      "ledger": 5567623,
+      "status": "SUCCESS"
+    }
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "network": "Stellar Testnet",
+  "auditTimestamp": "2026-11-05T07:12:29.787Z",
+  "wasmUploads": {
+    "did_registry": {
+      "hash": "da3cc052e4652462c59579842b2290961f807f7c69d6b3bdf55fbae7429720d0",
+      "txHash": "4dbd76107b4d0c4a92994518850749c063ca3ffe54681f35ca34cfd3c9362707",
+      "ledger": 5567764
+    },
+    "compliance_engine": {
+      "hash": "a748176dd25d338e1f34d9a6f5d7387a5a53839094de57424976b0c89c406919",
+      "txHash": "64ea5ac7d744e51f9710738f15c4e24f7a832ff4cb47b890c9350be8ad1b22ee",
+      "ledger": 5567766
+    },
+    "vc_verifier": {
+      "hash": "013da017dfe680e1722ea489a5e828c7ec2ce2bc7b21c7f08a75302dd93cd33f",
+      "txHash": "d47e8f39fee7200eedbc985b084f498c68cf00cac9c2d631b483fe4fb7e25135",
+      "ledger": 5567768
+    }
+  },
+  "reproducedContracts": {
+    "did_registry": {
+      "contractId": "CBPKUCAYGAFRKXKHRLLG7KZXCHQAGYRQLIGKPXOGLCZGZTMV5JN3SBBX",
+      "txHash": "54bfa3691912e8ef747bbd060d76d2893941910553dacb2c9c78ccf67628f680",
+      "ledger": 5567781
+    },
+    "vc_verifier": {
+      "contractId": "CABOISTOEOYKQY46U2TU57DXOGLTQRTUB5THLS2ICMYXMDF2SA7L3UPJ",
+      "txHash": "bca2b66ca1dea03ee0b5ca2379393494b82419bda10323685cb8cd0e49356437",
+      "ledger": 5567784
+    },
+    "compliance_engine": {
+      "contractId": "CAZSHQLBCHWVCALAN4SNI3MB2IVD4UNS6PCZ763LK47N6IU3YCOP73TA",
+      "txHash": "a6609c28837c031c681c8e77826dd16f0532ea775e106e8059df05229cbb5572",
+      "ledger": 5567789
+    }
+  },
+  "lifecycleTxs": {
+    "vc_init": {
+      "txHash": "3dc71f7fc818d95e4c09077baae4db1005fa1ee721050040c6bfbbd044d5a05b",
+      "ledger": 5567792
+    },
+    "comp_init": {
+      "txHash": "7c1f46982fcb05d4c836230c7bfb7129f9b0558a8b8aaf5cbe18e9c1894e7529",
+      "ledger": 5567794
+    },
+    "set_verifier": {
+      "txHash": "ef1ce652a9f1f30c411901c735d3f551935c6cb12fc09c7d7f1a0dba32839a9d",
+      "ledger": 5567798
+    },
+    "register_did": {
+      "txHash": "e94cf1b9005e48b43b6ab9818a10da3cd54b8362038ee0de5a114cb18220a759",
+      "ledger": 5567800
+    },
+    "add_issuer": {
+      "txHash": "cd57a443dd8fda40575b069b9e0c0334e19bd0d4daf286bfc519735c2429f5d9",
+      "ledger": 5567805
+    },
+    "issue_credential": {
+      "txHash": "5ce0c9ff4a71c1d449e732631ef02b83c40121b3fb12a61182fc4735eb50c625",
+      "ledger": 5567810
+    },
+    "set_policy": {
+      "txHash": "97b509712921c4eac1f9f8085c3bc30cd56f3aa3cffbd54e4a5cc625f87ef49a",
+      "ledger": 5567814
+    },
+    "revoke_credential": {
+      "txHash": "9191a8698c6c4f279bc9275644d06e7a43929810a1b12b3e468ddcd738abadb7",
+      "ledger": 5567818
+    }
+  },
+  "stateVerifications": {
+    "did_resolved_id": "did:stellar:GACJNK7HOWTVCFJXT5WZSWIG6IOU27DYCOCIJIL7GUU4ERQCOLKAGJXT",
+    "did_active": true,
+    "is_valid_initial": true,
+    "is_compliant_initial": true,
+    "is_valid_post_revocation": false,
+    "is_compliant_post_revocation": false
+  }
+}
