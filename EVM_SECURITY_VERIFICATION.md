@@ -1,9 +1,9 @@
 # EVM Destination Receiver Security & Cryptographic Verification
 
-**Contract:** [`contracts/evm/AttestationReceiver.sol`](file:///C:/Users/USER/.gemini/antigravity/scratch/Decentralized-Identity--DID--and-Cross-Chain-Compliance/contracts/evm/AttestationReceiver.sol)  
-**Relayer:** [`services/cross-chain-bridge/src/lib/evmRelayer.js`](file:///C:/Users/USER/.gemini/antigravity/scratch/Decentralized-Identity--DID--and-Cross-Chain-Compliance/services/cross-chain-bridge/src/lib/evmRelayer.js)  
+**Contract:** [`contracts/evm/AttestationReceiver.sol`](contracts/evm/AttestationReceiver.sol)  
+**Relayer:** [`services/cross-chain-bridge/src/lib/evmRelayer.js`](services/cross-chain-bridge/src/lib/evmRelayer.js)  
 **Compiler:** Solidity `0.8.20`  
-**Test Suite:** [`services/cross-chain-bridge/__tests__/receiver.test.js`](file:///C:/Users/USER/.gemini/antigravity/scratch/Decentralized-Identity--DID--and-Cross-Chain-Compliance/services/cross-chain-bridge/__tests__/receiver.test.js) (20 tests passing)  
+**Test Suite:** [`services/cross-chain-bridge/__tests__/receiver.test.js`](services/cross-chain-bridge/__tests__/receiver.test.js) (20 tests passing)  
 **Verification Date:** November 5, 2026  
 
 ---
@@ -64,7 +64,7 @@ function transferOwnership(address newOwner) external onlyOwner {
 ## 4. Cross-Chain Integration Status & Prerequisites for Live Deployment
 
 ### Current State
-- The EVM destination contract [`AttestationReceiver.sol`](file:///C:/Users/USER/.gemini/antigravity/scratch/Decentralized-Identity--DID--and-Cross-Chain-Compliance/contracts/evm/AttestationReceiver.sol) is compiled into `AttestationReceiver.json` with ABI and bytecode.
+- The EVM destination contract [`AttestationReceiver.sol`](contracts/evm/AttestationReceiver.sol) is compiled into `AttestationReceiver.json` with ABI and bytecode.
 - The unit and integration tests simulate the full EVM environment, validating contract compilation, execution, signature recovery, and storage updates.
 
 ### Remaining Prerequisites for Public EVM Testnet (e.g. Sepolia)

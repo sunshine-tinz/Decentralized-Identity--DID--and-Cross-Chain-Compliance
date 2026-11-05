@@ -19,7 +19,7 @@ The repository satisfies all criteria for open-source technical review and pre-r
 1. **Flawless Test Reproducibility**: 110 automated tests run and pass cleanly with **0 failures, 0 errors, and 0 skipped tests**.
 2. **Strict Code Quality**: `cargo fmt` passes cleanly; `cargo clippy` emits **0 warnings** on `-D warnings`; `eslint` passes cleanly; TypeScript compiler (`tsc`) compiles with 0 errors.
 3. **Live On-Chain Stellar Deployments**: All three Soroban contracts were compiled, uploaded, instantiated, initialized, and linked on live Stellar Testnet (Protocol 22+). Public method invocations (DID registration, resolution, issuer allowlisting, credential issuance, validity checking, policy evaluation, and revocation reversal) were executed live and confirmed across multiple ledgers.
-4. **Hardened EVM Destination Contract**: The new Solidity contract [`AttestationReceiver.sol`](file:///C:/Users/USER/.gemini/antigravity/scratch/Decentralized-Identity--DID--and-Cross-Chain-Compliance/contracts/evm/AttestationReceiver.sol) implements owner governance, relayer allowlisting, single-use nonce tracking, and EIP-191 personal signature verification incorporating chain ID (`block.chainid`) and contract address (`address(this)`) domain separation.
+4. **Hardened EVM Destination Contract**: The new Solidity contract [`AttestationReceiver.sol`](contracts/evm/AttestationReceiver.sol) implements owner governance, relayer allowlisting, single-use nonce tracking, and EIP-191 personal signature verification incorporating chain ID (`block.chainid`) and contract address (`address(this)`) domain separation.
 5. **Fail-Closed Cryptographic Posture**: The previous prototype's insecure ring-signature stub (which accepted arbitrary bytes) has been completely replaced with an unconditional fail-closed gate. The SDK, frontend, and contracts transparently disclose that zero-knowledge ring proofs are unavailable.
 6. **No Leaked Secrets**: Thorough inspection confirms that zero private keys, API tokens, or `.env` files are tracked in git.
 
@@ -90,7 +90,7 @@ The audit explicitly evaluated and confirmed both operational phases on Stellar 
 
 ## 4. EVM Destination Contract Security Audit
 
-The EVM receiver contract was audited at [`contracts/evm/AttestationReceiver.sol`](file:///C:/Users/USER/.gemini/antigravity/scratch/Decentralized-Identity--DID--and-Cross-Chain-Compliance/contracts/evm/AttestationReceiver.sol).
+The EVM receiver contract was audited at [`contracts/evm/AttestationReceiver.sol`](contracts/evm/AttestationReceiver.sol).
 
 ### Signature Preimage Construction
 ```solidity

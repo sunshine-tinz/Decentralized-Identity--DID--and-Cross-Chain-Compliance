@@ -7,16 +7,17 @@ compliance attributes with expiry and revocation, evaluates compliance policies
 on-chain, and exports attestation snapshots that a relayer can forward to an EVM
 chain.
 
-It is a prototype. Ring-signature proofs and standards conformance are **not**
-implemented; see `AUDIT.md` for the full findings.
+It is a functional prototype. Ring-signature proofs and zero-knowledge selective
+disclosure are **not** implemented; public on-chain verifiable credentials are used
+instead. See `AUDIT.md` and `PRIVACY_FEATURE_STATUS.md` for the full findings.
 
 ## Layer diagram
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                    Frontend (React, Vite)                    │
-│  /register  /verify  /prove  /issuer  /admin                 │
-│  Placeholder pages — no SDK or API calls wired yet.          │
+│  /register  /verify  /prove  /compliance  /bridge  /issuer   │
+│  Freighter wallet context, live contract RPC & KYC API calls │
 └─────────────────────────┬────────────────────────────────────┘
                           │ @stellar-did/sdk (TypeScript)
 ┌─────────────────────────▼────────────────────────────────────┐
@@ -42,8 +43,14 @@ implemented; see `AUDIT.md` for the full findings.
 │  │ POST /api/kyc/request     │  │ Soroban getEvents         │ │
 │  │ GET  /api/kyc/credential  │  │ validate + dedupe          │ │
 │  │ POST /api/issuer/approve  │  │ sign + relay to EVM        │ │
-│  └──────────────────────────┘  └───────────────────────────┘ │
-└──────────────────────────────────────────────────────────────┘
+│  └──────────────────────────┘  └─────────────┬─────────────┘ │
+└──────────────────────────────────────────────┼───────────────┘
+                                               │ EIP-191 relayer tx
+                                  ┌────────────▼─────────────┐
+                                  │   EVM Destination        │
+                                  │ AttestationReceiver.sol  │
+                                  │ Replay + domain check    │
+                                  └──────────────────────────┘
 ```
 
 ## Contract interactions
@@ -108,15 +115,18 @@ protection, and protection against rogue keys.
      emits (compliance, attestation) = (subject, policy, compliant)
 2. Bridge reads Soroban RPC getEvents, filtering by contract + topics
 3. Bridge validates contract id, topics, address, policy, and boolean
-4. Bridge signs EIP-191(keccak256(subject, policy, compliant, ledger, nonce, chainId))
+4. Bridge signs EIP-191(keccak256(subject, policy, compliant, nonce, chainId, destinationAddress))
 5. Bridge → EVM AttestationReceiver.receiveAttestation(subject, policy, compliant, nonce, sig)
 6. Bridge verifies receipt.status == 1
 ```
 
-Step 5's destination contract is **not in this repository**. Without it there is no
-relayer allowlist, no nonce replay protection on the destination, and no finality
-policy. The attestation payload is a snapshot, not an on-chain signature: only the
-relayer's signature can be verified, which makes the relayer a trusted party.
+The EVM receiver contract is implemented in `contracts/evm/AttestationReceiver.sol`.
+It enforces owner governance, relayer allowlisting, single-use nonce tracking, and
+strict domain separation via `address(this)` and `block.chainid`.
+Automated testing in `services/cross-chain-bridge/__tests__/receiver.test.js` verifies
+8 security properties against attacks (forgery, replay, chain mismatch, contract mismatch,
+tampering). Live broadcast to a public EVM testnet (e.g. Sepolia) requires a configured
+RPC URL and funded relayer private key.
 
 ## Privacy model
 
@@ -135,8 +145,9 @@ relayer's signature can be verified, which makes the relayer a trusted party.
 | Standard | Status |
 |---|---|
 | W3C DID Core | Partial — identifier + document hash only; no DID document or resolver |
-| W3C VC Data Model | Not implemented |
-| SEP-10 / SEP-12 / SEP-45 | Not implemented (see `sep-references.md`) |
+| W3C VC Data Model | Not implemented — typed contract structs used |
+| EIP-191 | Fully implemented on EVM `AttestationReceiver.sol` |
+| SEP-10 / SEP-12 / SEP-45 | Not implemented (deferred to Phase 2 roadmap) |
 | BLS12-381 | Not available in the pinned SDK (Protocol 22+ required); no scheme implemented |
 
 ## Storage and retention
@@ -149,16 +160,12 @@ relayer's signature can be verified, which makes the relayer a trusted party.
 | Compliance | `POL:<name>` | persistent, TTL bumped on write |
 | VC Verifier / Compliance | `ADMIN`, `ISSUERS`, `VERIFIER` | instance, TTL bumped on write |
 
-TTL constants are conservative (threshold 4,096; extend to 17,280 ledgers). Adjust
-per network before relying on long-lived identity records.
-
 ## Known limitations
 
-See `AUDIT.md`. The principal ones:
+See `AUDIT.md` and `SECURITY_LIMITATIONS.md`. The principal ones:
 
-1. Ring proofs disabled; no anonymity.
-2. No EVM destination contract; relay untested end to end.
-3. KYC service is in-memory and unencrypted; credentials it mints are placeholders.
-4. DID identifiers are bound to the controller key (no rotation/recovery).
-5. Initialisation is not atomic with deployment (front-running risk on deploy).
-6. Frontend pages are placeholders.
+1. **Ring proofs disabled; no anonymity**: public on-chain credentials used.
+2. **Live public EVM broadcasting pending deployment infrastructure**: receiver and relayer verified via automated EVM test suites; live Sepolia execution requires funded gas keys.
+3. **KYC service is in-memory and unencrypted**: documents are stored in memory for review.
+4. **DID identifiers are bound to controller keys**: rotation and recovery are not supported.
+5. **Phase 2 roadmap**: SEP-10 / SEP-12 auth flows and CAP-0059 zero-knowledge proof circuits.

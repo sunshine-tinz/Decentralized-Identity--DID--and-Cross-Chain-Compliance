@@ -17,7 +17,7 @@ All three contracts were compiled in release mode using `wasm32-unknown-unknown`
 | **`compliance_engine.wasm`** | 6,788 B | `a748176dd25d338e1f34d9a6f5d7387a5a53839094de57424976b0c89c406919` | `64ea5ac7d744e51f9710738f15c4e24f7a832ff4cb47b890c9350be8ad1b22ee` | `5567766` | `SUCCESS` | [View Tx](https://stellar.expert/explorer/testnet/tx/64ea5ac7d744e51f9710738f15c4e24f7a832ff4cb47b890c9350be8ad1b22ee) |
 | **`vc_verifier.wasm`** | 19,275 B | `013da017dfe680e1722ea489a5e828c7ec2ce2bc7b21c7f08a75302dd93cd33f` | `d47e8f39fee7200eedbc985b084f498c68cf00cac9c2d631b483fe4fb7e25135` | `5567768` | `SUCCESS` | [View Tx](https://stellar.expert/explorer/testnet/tx/d47e8f39fee7200eedbc985b084f498c68cf00cac9c2d631b483fe4fb7e25135) |
 
-*Note: In previous deployment runs, uncompressed iterations were also anchored on testnet (Tx `2667809c...`, `3eb42e94...`, `d9987a0a...`). The current release WASMs match the above hashes with 100% byte-for-byte fidelity.*
+*(Historical uploads from prior session: `did_registry.wasm` in Tx `2667809c683f29ac401637905635cd18030c54ef94b67e089c0cf46cad4b3037` [Ledger 5564504], `compliance_engine.wasm` in Tx `3eb42e94396b88f249c88d03b14326867f562c9c11776f8e2f01c6c339b0dfb0` [Ledger 5564579], `vc_verifier.wasm` in Tx `d9987a0a188007107a76679a5fa976db48c6c038e1fa3869240999c58535f1a9` [Ledger 5564695]).*
 
 ---
 
@@ -25,7 +25,7 @@ All three contracts were compiled in release mode using `wasm32-unknown-unknown`
 
 Independent deployment and instantiation was performed on Stellar Testnet using fresh accounts funded via Friendbot.
 
-### Deployed Contract Instances
+### Deployed Contract Instances (Active Testnet Configuration)
 
 | Contract Name | Contract Address (StrKey) | Deployment Tx Hash | Ledger | Status | Explorer Link |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -33,7 +33,7 @@ Independent deployment and instantiation was performed on Stellar Testnet using 
 | **VC Verifier** | `CABOISTOEOYKQY46U2TU57DXOGLTQRTUB5THLS2ICMYXMDF2SA7L3UPJ` | `bca2b66ca1dea03ee0b5ca2379393494b82419bda10323685cb8cd0e49356437` | `5567784` | `SUCCESS` | [View Contract](https://stellar.expert/explorer/testnet/contract/CABOISTOEOYKQY46U2TU57DXOGLTQRTUB5THLS2ICMYXMDF2SA7L3UPJ) |
 | **Compliance Engine** | `CAZSHQLBCHWVCALAN4SNI3MB2IVD4UNS6PCZ763LK47N6IU3YCOP73TA` | `a6609c28837c031c681c8e77826dd16f0532ea775e106e8059df05229cbb5572` | `5567789` | `SUCCESS` | [View Contract](https://stellar.expert/explorer/testnet/contract/CAZSHQLBCHWVCALAN4SNI3MB2IVD4UNS6PCZ763LK47N6IU3YCOP73TA) |
 
-*(Historical instances from prior audit runs: DID `CBX5VXEP...`, VC `CCRAPRZM...`, Comp `CBDDV2XO...` were also verified on ledgers 5567594, 5567597, and 5567600).*
+*(Historical contract instances from prior audit sessions: DID `CBX5VXEPKBQUIZJN7CPBPSEQLVAVT2DWDLBYG67GZJSKCPOBFZHP3LDG` [Ledger 5567594], VC `CCRAPRZM3I2A2AUSU4Z5LGBQEUSMO5L7YPP7ZHUNS2HAVVQP746DSQS7` [Ledger 5567597], and Compliance `CBDDV2XOANTNJRZQ6KRD2RUMHS2WF3X77ZX5FIXCKO4I6B2B767OEE22` [Ledger 5567600]).*
 
 ### Initializations & Inter-Contract Links
 - **`VCVerifier.initialize`**: Tx [`3dc71f7fc818d95e4c09077baae4db1005fa1ee721050040c6bfbbd044d5a05b`](https://stellar.expert/explorer/testnet/tx/3dc71f7fc818d95e4c09077baae4db1005fa1ee721050040c6bfbbd044d5a05b) (Ledger `5567792`)

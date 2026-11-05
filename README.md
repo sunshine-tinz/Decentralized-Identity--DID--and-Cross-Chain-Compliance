@@ -6,6 +6,20 @@ This repository contains a Soroban-based DID registry, an issuer-attested creden
 
 ---
 
+## Deployed Stellar Testnet Contracts (Protocol 22+)
+
+All three core contracts are deployed, initialized, and verified live on Stellar Testnet:
+
+| Contract | Address | Explorer Link |
+|---|---|---|
+| **DID Registry** | `CBPKUCAYGAFRKXKHRLLG7KZXCHQAGYRQLIGKPXOGLCZGZTMV5JN3SBBX` | [View on Stellar Expert](https://stellar.expert/explorer/testnet/contract/CBPKUCAYGAFRKXKHRLLG7KZXCHQAGYRQLIGKPXOGLCZGZTMV5JN3SBBX) |
+| **VC Verifier** | `CABOISTOEOYKQY46U2TU57DXOGLTQRTUB5THLS2ICMYXMDF2SA7L3UPJ` | [View on Stellar Expert](https://stellar.expert/explorer/testnet/contract/CABOISTOEOYKQY46U2TU57DXOGLTQRTUB5THLS2ICMYXMDF2SA7L3UPJ) |
+| **Compliance Engine** | `CAZSHQLBCHWVCALAN4SNI3MB2IVD4UNS6PCZ763LK47N6IU3YCOP73TA` | [View on Stellar Expert](https://stellar.expert/explorer/testnet/contract/CAZSHQLBCHWVCALAN4SNI3MB2IVD4UNS6PCZ763LK47N6IU3YCOP73TA) |
+
+*(Historical contract instances from prior audit sessions: DID `CBX5VXEP...`, VC `CCRAPRZM...`, Comp `CBDDV2XO...` on ledgers 5567594, 5567597, and 5567600).*
+
+---
+
 ## Current capability
 
 | Area | State |
@@ -106,6 +120,7 @@ npm ci && npm test -- --run && npm run build
 - **Compliance** cannot be asserted by a caller; it is derived from credentials and fails closed.
 - **Ring-signature anonymity is not provided.** Do not describe this system as anonymous or as a zero-knowledge/selective-disclosure system.
 - **Cross-Chain Replay Protection** is strictly enforced via EIP-191 digest binding to `subject`, `policy`, `compliant`, `nonce`, `chainId`, and `destinationAddress`.
+- **Cross-Chain Security Boundary (EVM Receiver vs Live Public Broadcast)**: The EVM receiver (`AttestationReceiver.sol`) and relayer logic have been verified with 20 automated tests covering 8 attack vectors in local/in-memory EVM simulation. Live transaction submission to a public EVM testnet (e.g. Sepolia) has not been demonstrated live in this environment, as it requires external gas-funded relayer keys and dedicated EVM RPC access.
 
 ---
 

@@ -86,13 +86,13 @@ Both stages were executed and verified on live Stellar Testnet (Protocol 22+):
   - On-chain query post-revocation: `is_credential_valid(subject, "kyc_passed")` returned `false`.
   - On-chain query post-revocation: `is_compliant(subject, "defi_pool")` returned `false`.
 
-Full JSON machine-readable deployment evidence is recorded in [`TESTNET_DEPLOYMENT_EVIDENCE.json`](file:///C:/Users/USER/.gemini/antigravity/scratch/Decentralized-Identity--DID--and-Cross-Chain-Compliance/TESTNET_DEPLOYMENT_EVIDENCE.json).
+Full JSON machine-readable deployment evidence is recorded in [`TESTNET_DEPLOYMENT_EVIDENCE.json`](TESTNET_DEPLOYMENT_EVIDENCE.json).
 
 ---
 
 ## 4. EVM Destination Contract Security Audit
 
-The EVM receiver contract was implemented at [`contracts/evm/AttestationReceiver.sol`](file:///C:/Users/USER/.gemini/antigravity/scratch/Decentralized-Identity--DID--and-Cross-Chain-Compliance/contracts/evm/AttestationReceiver.sol) and compiled to `contracts/evm/AttestationReceiver.json`.
+The EVM receiver contract was implemented at [`contracts/evm/AttestationReceiver.sol`](contracts/evm/AttestationReceiver.sol) and compiled to `contracts/evm/AttestationReceiver.json`.
 
 ### Cryptographic Digest Construction
 The relayer and receiver calculate an EIP-191 digest incorporating full domain separation:
@@ -152,7 +152,7 @@ sequenceDiagram
 
 ## 7. Repository Hygiene & Release Readiness
 
-- **License**: MIT License verified in [`LICENSE`](file:///C:/Users/USER/.gemini/antigravity/scratch/Decentralized-Identity--DID--and-Cross-Chain-Compliance/LICENSE).
+- **License**: MIT License verified in [`LICENSE`](LICENSE).
 - **Secrets Check**: Clean. No `.env` files, private keys, or API tokens are tracked in git history.
 - **Git Tracking**: All newly authored contracts, frontend views, SDK write methods, tests, and documentation are properly tracked in git.
 - **Documentation**: `README.md` updated to accurately describe the completed system and capabilities. Detailed evidence stored in `TESTNET_DEPLOYMENT_EVIDENCE.md` and `SECURITY_LIMITATIONS.md`.
