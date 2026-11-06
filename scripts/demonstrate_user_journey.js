@@ -92,9 +92,8 @@ async function fundAccount(pubkey) {
 
 async function invokeMethod(sourceKeypair, contractId, method, args, signers = []) {
   const account = await rpc.getAccount(sourceKeypair.publicKey());
-  const contract = new Address(contractId);
   const op = Operation.invokeContractFunction({
-    contractAddress: contract,
+    contract: contractId,
     function: method,
     args: args
   });
@@ -125,9 +124,8 @@ async function invokeMethod(sourceKeypair, contractId, method, args, signers = [
 
 async function simulateRead(sourceKeypair, contractId, method, args) {
   const account = await rpc.getAccount(sourceKeypair.publicKey());
-  const contract = new Address(contractId);
   const op = Operation.invokeContractFunction({
-    contractAddress: contract,
+    contract: contractId,
     function: method,
     args: args
   });
