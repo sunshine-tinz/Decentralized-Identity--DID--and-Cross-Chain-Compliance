@@ -34,7 +34,7 @@ router.post("/request", (req, res) => {
     return res.status(400).json({ error: validation.error });
   }
 
-  const { userId, issuerPubkey, attributes, personalInfo, documentPhoto } =
+  const { userId, subject, issuerPubkey, attributes, personalInfo, documentPhoto } =
     validation.value;
 
   const requestId = crypto.randomUUID();
@@ -43,6 +43,7 @@ router.post("/request", (req, res) => {
   store.kycRequests.set(requestId, {
     requestId,
     userId,
+    subject,
     issuerPubkey,
     attributes,
     personalInfo,

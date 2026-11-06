@@ -59,10 +59,16 @@ const ADMIN_KEY: &str = "ADMIN";
 const VERIFIER_KEY: &str = "VERIFIER";
 const POLICY_PREFIX: &str = "POL";
 
-const TTL_THRESHOLD: u32 = 4_096;
-const TTL_EXTEND_TO: u32 = 17_280;
-const INSTANCE_TTL_THRESHOLD: u32 = 4_096;
-const INSTANCE_TTL_EXTEND_TO: u32 = 17_280;
+/// Minimum remaining TTL before a persistent entry is extended (~7.5 days at 5 s/ledger).
+const TTL_THRESHOLD: u32 = 129_600;
+/// TTL (in ledgers) that policy entries are extended to on write.
+///
+/// ~30 days at 5 s/ledger, matching `did_registry` and `vc_verifier`. Policies are
+/// long-lived configuration: a 24 h window silently archived them and made
+/// `is_compliant` return `false` for a policy that still existed economically.
+const TTL_EXTEND_TO: u32 = 518_400;
+const INSTANCE_TTL_THRESHOLD: u32 = 129_600;
+const INSTANCE_TTL_EXTEND_TO: u32 = 518_400;
 
 // ── Contract ──────────────────────────────────────────────────────────────────
 
@@ -209,6 +215,12 @@ impl ComplianceEngine {
     /// panics — when the policy is unknown, no verifier is configured, or any
     /// required credential is missing, expired, revoked, or from a de-registered
     /// issuer.
+    ///
+    /// The verifier call uses `try_invoke_contract`, so a verifier address that is
+    /// not a contract (or a verifier that traps) also evaluates to `false` rather
+    /// than aborting. This matters because `is_compliant` is the entry point third
+    /// parties integrate against: a misconfigured verifier must degrade to
+    /// "not compliant", not to a failed transaction.
     pub fn is_compliant(env: Env, subject: Address, policy: Symbol) -> bool {
         let policy_key = (Symbol::new(&env, POLICY_PREFIX), policy);
         let policy: Policy = match env.storage().persistent().get(&policy_key) {
@@ -290,7 +302,17 @@ impl ComplianceEngine {
             subject.clone().into_val(env),
             attribute.clone().into_val(env),
         ];
-        env.invoke_contract::<bool>(verifier, &Symbol::new(env, "is_credential_valid"), args)
+        match env.try_invoke_contract::<bool, soroban_sdk::Error>(
+            verifier,
+            &Symbol::new(env, "is_credential_valid"),
+            args,
+        ) {
+            Ok(Ok(valid)) => valid,
+            // Not-a-contract, host error, or a trap inside the verifier. Fail closed:
+            // the old `invoke_contract` call aborted the whole `is_compliant` call
+            // (ACCEPTANCE-AUDIT.md M-1).
+            _ => false,
+        }
     }
 
     fn admin(env: &Env) -> Address {
@@ -331,6 +353,23 @@ mod tests {
 
     fn kyc(env: &Env) -> Symbol {
         Symbol::new(env, "kyc_passed")
+    }
+
+    /// Regression for ACCEPTANCE-AUDIT.md M-1: a verifier address that is not a
+    /// contract used to trap out of `is_compliant`, despite the documented promise
+    /// that it never panics.
+    #[test]
+    fn test_unreachable_verifier_fails_closed() {
+        let env = Env::default();
+        let f = setup(&env);
+        let not_a_contract = Address::generate(&env);
+        f.client.set_verifier(&f.admin, &not_a_contract);
+
+        assert!(!f.client.is_compliant(&f.subject, &f.policy));
+
+        let attestation = f.client.export_attestation(&f.subject, &f.policy);
+        assert!(!attestation.compliant);
+        assert_eq!(attestation.verifier, not_a_contract);
     }
 
     fn sanctions(env: &Env) -> Symbol {
@@ -397,6 +436,31 @@ mod tests {
         f.verifier
             .issue_credential(&f.issuer, &f.subject, &sanctions(&env), &1_000);
         assert!(f.client.is_compliant(&f.subject, &f.policy));
+    }
+
+    /// Regression for ACCEPTANCE-AUDIT.md H-5: a policy entry used to be extended
+    /// only to 17,280 ledgers (~24 h), so long-lived configuration could archive.
+    #[test]
+    fn test_set_policy_extends_storage_ttl() {
+        use soroban_sdk::testutils::storage::Persistent;
+
+        let env = Env::default();
+        set_ledger(&env, 100);
+        env.mock_all_auths();
+
+        let engine_id = env.register_contract(None, ComplianceEngine);
+        let client = ComplianceEngineClient::new(&env, &engine_id);
+        let admin = Address::generate(&env);
+        let policy = Symbol::new(&env, "defi_pool");
+        client.initialize(&admin);
+        client.set_policy(&admin, &policy, &vec![&env, kyc(&env)]);
+
+        let key = (Symbol::new(&env, POLICY_PREFIX), policy);
+        let remaining = env.as_contract(&engine_id, || env.storage().persistent().get_ttl(&key));
+        assert!(
+            remaining > 17_280,
+            "policy TTL must outlive the old 24h window, got {remaining}"
+        );
     }
 
     #[test]
@@ -472,13 +536,17 @@ mod tests {
             .revoke_credential(&f.issuer, &f.subject, &kyc(&env));
         assert!(!f.client.is_compliant(&f.subject, &f.policy));
 
-        // Re-issue and let it expire.
+        // A revocation is terminal (ACCEPTANCE-AUDIT.md H-1): the revoked slot can
+        // never be re-issued, so expiry is exercised on a second subject instead.
+        let other = Address::generate(&env);
         f.verifier
-            .issue_credential(&f.issuer, &f.subject, &kyc(&env), &1_000);
-        assert!(f.client.is_compliant(&f.subject, &f.policy));
+            .issue_credential(&f.issuer, &other, &kyc(&env), &1_000);
+        f.verifier
+            .issue_credential(&f.issuer, &other, &sanctions(&env), &1_000);
+        assert!(f.client.is_compliant(&other, &f.policy));
 
         set_ledger(&env, 1_000);
-        assert!(!f.client.is_compliant(&f.subject, &f.policy));
+        assert!(!f.client.is_compliant(&other, &f.policy));
     }
 
     #[test]
