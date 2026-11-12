@@ -37,9 +37,10 @@ This remediation addressed the high-impact implementation and verification gaps 
   - Migrated `sdk`, `services/kyc-issuer`, and `services/cross-chain-bridge` test/dev runners from `jest`/`nodemon` to `vitest@^5.1.0` + built-in `node --watch`, with targeted overrides (`minimatch@^11.0.8` for `typescript-eslint`, `tmp@^0.2.7` for `solc`).
   - Result: **`found 0 vulnerabilities`** in `npm audit` across all 4 packages (`sdk`, `frontend`, `services/kyc-issuer`, `services/cross-chain-bridge`), enforced by CI.
 * **Rust `cargo-audit` (`cargo-audit v0.23.0` on `contracts/Cargo.lock`, 172 crate dependencies):**
-  - `cargo audit` reported `RUSTSEC-2026-0387` (`crypto-bigint v0.5.5`), `RUSTSEC-2024-0436` (`paste v1.0.15`, unmaintained warning), and yanked `spin v0.9.8` warning.
-  - `cargo tree --locked --target wasm32-unknown-unknown` confirms `crypto-bigint`, `paste`, and `spin` are **absent from the `wasm32-unknown-unknown` contract bytecode**; all three stem strictly from `soroban-env-host v21.2.1` (Soroban testutils/host VM pulled via `soroban-sdk v21.7.7`).
-  - `.github/workflows/ci.yml` enforces both that `crypto-bigint` never links into `--target wasm32-unknown-unknown` and runs `cargo audit --ignore RUSTSEC-2026-0387 --ignore RUSTSEC-2024-0436`.
+  - Updated `spin` in `contracts/Cargo.lock` from `0.9.8` (yanked) to `0.9.9`, leaving **zero yanked crates**.
+  - Remaining findings (`RUSTSEC-2026-0387` `crypto-bigint v0.5.5`, patched in `>=0.7.6`; and `RUSTSEC-2024-0436` unmaintained `paste v1.0.15`) occur strictly inside Soroban test/host dependencies (`soroban-env-host v21.2.1` → `k256`/`p256` → `elliptic-curve 0.13.8`, and `soroban-wasmi` → `wasmi_core 0.13.0`), and `cargo tree --locked --target wasm32-unknown-unknown` confirms neither crate links into compiled contract WASMs.
+  - Note on upstream fixability: crates.io metadata confirms even `soroban-sdk 29.0.1` (`soroban-env-host 30.0.0`) still specifies `elliptic-curve ^0.13.5` (`crypto-bigint ^0.5`) and `soroban-wasmi 29.0.0` (`wasmi_core ^0.13`), so these advisories cannot be resolved by a user-space `soroban-sdk` bump until upstream `stellar/rs-soroban-env` adopts `elliptic-curve 0.14`+.
+  - `.github/workflows/ci.yml` verifies `crypto-bigint` is excluded from `--target wasm32-unknown-unknown` before running `cargo audit --ignore RUSTSEC-2026-0387 --ignore RUSTSEC-2024-0436`.
 
 ---
 
