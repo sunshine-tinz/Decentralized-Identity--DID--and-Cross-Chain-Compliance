@@ -14,12 +14,7 @@ const store = require("../store");
 const { buildCredential, buildW3CVerifiableCredential } = require("../lib/credential");
 const { requireIssuer } = require("../lib/auth");
 const { validateReason } = require("../lib/validate");
-const {
-  loadChainConfig,
-  issueCredential,
-  revokeCredential,
-  credentialExpiryLedger,
-} = require("../lib/chain");
+const chainLib = require("../lib/chain");
 
 const router = Router();
 
@@ -96,7 +91,7 @@ router.post("/approve", async (req, res) => {
 
   let chain;
   try {
-    chain = loadChainConfig(process.env, req.issuer.pubkey);
+    chain = chainLib.loadChainConfig(process.env, req.issuer.pubkey);
   } catch (err) {
     console.error("Chain configuration mismatch:", err && err.message);
     return res.status(500).json({ error: "Issuer signing identity mismatch" });
@@ -111,9 +106,9 @@ router.post("/approve", async (req, res) => {
     let expiresAtLedger;
     const transactions = [];
     try {
-      expiresAtLedger = await credentialExpiryLedger(chain);
+      expiresAtLedger = await chainLib.credentialExpiryLedger(chain);
       for (const attribute of kycReq.attributes) {
-        const { hash } = await issueCredential(chain, {
+        const { hash } = await chainLib.issueCredential(chain, {
           subject: kycReq.subject,
           attribute,
           expiresAt: expiresAtLedger,
@@ -126,7 +121,7 @@ router.post("/approve", async (req, res) => {
       const rollbackFailures = [];
       for (const issued of transactions) {
         try {
-          await revokeCredential(chain, {
+          await chainLib.revokeCredential(chain, {
             subject: kycReq.subject,
             attribute: issued.attribute,
           });

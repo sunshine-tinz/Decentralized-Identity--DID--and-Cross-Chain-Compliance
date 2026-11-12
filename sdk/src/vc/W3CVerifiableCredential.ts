@@ -87,7 +87,7 @@ export function signW3CCredential(
   }
 
   const digestHex = hashUnsignedCredential(vcWithoutProof);
-  const sig = keypair.sign(Buffer.from(digestHex, "hex")).toString("base64");
+  const sig = Buffer.from(keypair.sign(Buffer.from(digestHex, "hex"))).toString("base64");
 
   return {
     ...vcWithoutProof,

@@ -28,23 +28,23 @@ const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
 
-const jsXdr = require("../services/cross-chain-bridge/node_modules/@stellar/js-xdr");
 const {
   Address,
   Keypair,
   Networks,
   Operation,
-  SorobanRpc,
   TransactionBuilder,
   authorizeEntry,
   nativeToScVal,
+  rpc: SorobanRpcModule,
   scValToNative,
   xdr,
 } = require("../services/cross-chain-bridge/node_modules/@stellar/stellar-sdk");
 const { ethers } = require("../services/cross-chain-bridge/node_modules/ethers");
 
-// Protocol 22 CreateContractArgsV2 compatibility for stellar-sdk 12.x
-if (!xdr.SorobanAuthorizedFunction._arms.createContractV2HostFn) {
+// Only patch Protocol 22 CreateContractArgsV2 on older stellar-sdk (< 13) releases
+if (xdr.SorobanAuthorizedFunction?._arms && !xdr.SorobanAuthorizedFunction._arms.createContractV2HostFn) {
+  const jsXdr = require("../services/cross-chain-bridge/node_modules/@stellar/js-xdr");
   const context = { results: {} };
   const Struct = Object.getPrototypeOf(xdr.CreateContractArgs);
   const CreateContractArgsV2 = Struct.create(context, "CreateContractArgsV2", [
@@ -65,7 +65,7 @@ if (!xdr.SorobanAuthorizedFunction._arms.createContractV2HostFn) {
 }
 
 const RPC_URL = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
-const rpc = new SorobanRpc.Server(RPC_URL);
+const rpc = new SorobanRpcModule.Server(RPC_URL);
 
 const WASM_DIR = path.resolve(__dirname, "../contracts/target/wasm32-unknown-unknown/release");
 const RECEIVER_JSON = path.resolve(__dirname, "../contracts/evm/AttestationReceiver.json");
@@ -119,8 +119,19 @@ async function sendAndConfirm(sourceKp, op, extraSigners = []) {
     if (firstOp && Array.isArray(firstOp.auth)) {
       for (let i = 0; i < firstOp.auth.length; i += 1) {
         const entry = firstOp.auth[i];
-        if (entry.credentials().switch().name === "sorobanCredentialsAddress") {
-          const addr = Address.fromScAddress(entry.credentials().address().address()).toString();
+        const credType =
+          typeof entry.credentials === "function"
+            ? entry.credentials().switch().name
+            : entry.credentials?.type;
+        if (
+          credType === "sorobanCredentialsAddress" ||
+          credType === "sorobanCredentialsAddressV2"
+        ) {
+          const scAddr =
+            typeof entry.credentials === "function"
+              ? entry.credentials().address().address()
+              : (entry.credentials.value?.address ?? entry.credentials.address?.address);
+          const addr = Address.fromScAddress(scAddr).toString();
           const signer = extraSigners.find((s) => s.publicKey() === addr);
           if (signer) {
             firstOp.auth[i] = await authorizeEntry(
@@ -461,7 +472,7 @@ async function main() {
       stellarAddress: userKp.publicKey(),
       evmAddress: userEvmWallet.address,
       version: 1,
-      stellarSignature: userKp.sign(Buffer.from(linkMsg, "utf8")).toString("base64"),
+      stellarSignature: Buffer.from(userKp.sign(Buffer.from(linkMsg, "utf8"))).toString("base64"),
       evmSignature: await userEvmWallet.signMessage(linkMsg),
     });
 

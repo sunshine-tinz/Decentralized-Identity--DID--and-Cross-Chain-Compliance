@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { describe, expect, it, vi } from "vitest";
 import { Account, Keypair, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { DIDClient } from "../src/clients/DIDClient";
 import { VCClient } from "../src/clients/VCClient";
@@ -203,8 +204,8 @@ describe("ComplianceClient", () => {
   it("submits a valid signed transaction and polls until SUCCESS", async () => {
     const server = {
       ...serverReturning(nativeToScVal(true)),
-      sendTransaction: jest.fn(async () => ({ status: "PENDING", hash: "tx-hash-1" })),
-      getTransaction: jest
+      sendTransaction: vi.fn(async () => ({ status: "PENDING", hash: "tx-hash-1" })),
+      getTransaction: vi
         .fn()
         .mockResolvedValueOnce({ status: "NOT_FOUND" })
         .mockResolvedValueOnce({
@@ -230,8 +231,8 @@ describe("ComplianceClient", () => {
   it("rejects invalid XDR and failed RPC submissions", async () => {
     const server = {
       ...serverReturning(nativeToScVal(true)),
-      sendTransaction: jest.fn(async () => ({ status: "ERROR" })),
-      getTransaction: jest.fn(),
+      sendTransaction: vi.fn(async () => ({ status: "ERROR" })),
+      getTransaction: vi.fn(),
     };
 
     await expect(submitSignedTransaction(configWith(server), "not-valid-xdr")).rejects.toThrow(

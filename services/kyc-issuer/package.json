@@ -5,21 +5,21 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
-    "test": "jest --runInBand"
+    "dev": "node --watch src/index.js",
+    "test": "vitest run"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "^12.0.0",
+    "@stellar/stellar-sdk": "^17.4.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2"
   },
   "devDependencies": {
-    "jest": "^29.7.0",
-    "nodemon": "^3.0.2",
-    "supertest": "^6.3.4"
+    "@types/node": "^22.12.0",
+    "supertest": "^7.3.2",
+    "vitest": "^5.1.0"
   }
 }

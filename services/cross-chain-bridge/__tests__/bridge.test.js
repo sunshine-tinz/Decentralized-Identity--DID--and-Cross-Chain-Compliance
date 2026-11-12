@@ -44,7 +44,7 @@ async function createLinkedIdentity(registry, stellarKp, evmWallet, version = 1)
   const stellarAddress = stellarKp.publicKey();
   const evmAddress = evmWallet.address;
   const msg = buildLinkMessage({ stellarAddress, evmAddress, version });
-  const stellarSignature = stellarKp.sign(Buffer.from(msg, "utf8")).toString("base64");
+  const stellarSignature = Buffer.from(stellarKp.sign(Buffer.from(msg, "utf8"))).toString("base64");
   const evmSignature = await evmWallet.signMessage(msg);
   return registry.registerMapping({
     stellarAddress,
@@ -182,7 +182,7 @@ describe("IdentityRegistry (Stellar <-> EVM mapping)", () => {
         stellarAddress: stellarKp.publicKey(),
         evmAddress: evm1.address,
         version: 1,
-        stellarSignature: stellarKp.sign(Buffer.from(staleMsg, "utf8")).toString("base64"),
+        stellarSignature: Buffer.from(stellarKp.sign(Buffer.from(staleMsg, "utf8"))).toString("base64"),
         evmSignature: "0x00",
       })
     ).toThrow(/Stale mapping version/);
@@ -195,7 +195,7 @@ describe("IdentityRegistry (Stellar <-> EVM mapping)", () => {
     registry.revokeMapping({
       stellarAddress: stellarKp.publicKey(),
       version: 2,
-      stellarSignature: stellarKp.sign(Buffer.from(revokeMsg, "utf8")).toString("base64"),
+      stellarSignature: Buffer.from(stellarKp.sign(Buffer.from(revokeMsg, "utf8"))).toString("base64"),
     });
     expect(registry.resolve(stellarKp.publicKey())).toBeNull();
   });
@@ -219,13 +219,13 @@ describe("IdentityRegistry (Stellar <-> EVM mapping)", () => {
         stellarAddress: victimStellar.publicKey(),
         evmAddress: evmWallet.address,
         version: 1,
-        stellarSignature: attackerStellar.sign(Buffer.from(msg, "utf8")).toString("base64"),
+        stellarSignature: Buffer.from(attackerStellar.sign(Buffer.from(msg, "utf8"))).toString("base64"),
         evmSignature: "0x00",
       })
     ).toThrow(/Invalid Stellar ownership signature/);
 
     // Forged EVM signature
-    const validStellarSig = victimStellar.sign(Buffer.from(msg, "utf8")).toString("base64");
+    const validStellarSig = Buffer.from(victimStellar.sign(Buffer.from(msg, "utf8"))).toString("base64");
     const wrongEvmSig = await otherEvm.signMessage(msg);
     expect(() =>
       registry.registerMapping({
@@ -244,8 +244,8 @@ describe("EVMRelayer and Durable ComplianceBridge", () => {
 
   function relayerWith(receipt, contractOverrides = {}) {
     const contract = {
-      consumedNonce: jest.fn(async () => false),
-      receiveAttestation: jest.fn(async () => ({
+      consumedNonce: vi.fn(async () => false),
+      receiveAttestation: vi.fn(async () => ({
         hash: "0xabc",
         wait: async () => receipt,
       })),
@@ -253,7 +253,7 @@ describe("EVMRelayer and Durable ComplianceBridge", () => {
       getAddress: async () => "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
       ...contractOverrides,
     };
-    const wallet = { signTypedData: jest.fn(async () => "0xtypedsig") };
+    const wallet = { signTypedData: vi.fn(async () => "0xtypedsig") };
     return { relayer: new EVMRelayer({ contract, wallet }), contract, wallet };
   }
 
@@ -282,7 +282,7 @@ describe("EVMRelayer and Durable ComplianceBridge", () => {
   it("skips duplicate relay when nonce is already consumed on EVM", async () => {
     const { relayer, contract } = relayerWith(
       { status: 1 },
-      { consumedNonce: jest.fn(async () => true) }
+      { consumedNonce: vi.fn(async () => true) }
     );
     const result = await relayer.relay(attestation);
     expect(result.alreadyConfirmed).toBe(true);
@@ -335,7 +335,7 @@ describe("EVMRelayer and Durable ComplianceBridge", () => {
     expect(recoveredQueue.get(mappedEvent.id).state).toBe(STATES.PENDING);
 
     const relayer = {
-      relay: jest
+      relay: vi
         .fn()
         .mockRejectedValueOnce(new Error("EVM RPC timeout"))
         .mockResolvedValueOnce({ hash: "0xconfirmed", blockNumber: 901 }),

@@ -12,10 +12,10 @@ const {
   Address,
   Contract,
   Keypair,
-  SorobanRpc,
   StrKey,
   TransactionBuilder,
   nativeToScVal,
+  rpc,
 } = require("@stellar/stellar-sdk");
 
 const DEFAULT_TTL_LEDGERS = 518_400; // ~30 days at 5 s/ledger
@@ -92,7 +92,7 @@ function loadChainConfig(env = process.env, expectedIssuerId = null) {
 }
 
 function serverFor(config) {
-  return new SorobanRpc.Server(config.rpcUrl, {
+  return new rpc.Server(config.rpcUrl, {
     allowHttp: config.rpcUrl.startsWith("http://"),
   });
 }

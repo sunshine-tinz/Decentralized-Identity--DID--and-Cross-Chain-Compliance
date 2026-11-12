@@ -9,9 +9,9 @@
 import {
   Account,
   Contract,
-  SorobanRpc,
   TransactionBuilder,
   nativeToScVal,
+  rpc,
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
@@ -35,7 +35,7 @@ const TIMEOUT_SECONDS = 60;
  */
 export function getServer(config: StellarDIDConfig): SorobanServerLike {
   if (config.server) return config.server;
-  return new SorobanRpc.Server(config.rpcUrl) as unknown as SorobanServerLike;
+  return new rpc.Server(config.rpcUrl) as unknown as SorobanServerLike;
 }
 
 function buildTransaction(

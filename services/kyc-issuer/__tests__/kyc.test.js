@@ -5,14 +5,6 @@ const { Keypair, Networks, TransactionBuilder } = require("@stellar/stellar-sdk"
 const app = require("../src/index");
 const store = require("../src/store");
 const { clearConsumedChallenges } = require("../src/lib/sep10");
-
-jest.mock("../src/lib/chain", () => ({
-  loadChainConfig: jest.fn(),
-  issueCredential: jest.fn(),
-  revokeCredential: jest.fn(),
-  credentialExpiryLedger: jest.fn(),
-}));
-
 const chain = require("../src/lib/chain");
 
 const ISSUER_KEY = "test-issuer-key";
@@ -62,11 +54,11 @@ beforeEach(() => {
   delete process.env.PII_RETENTION_MS;
   delete process.env.RETRIEVAL_TOKEN_TTL_MS;
 
-  chain.loadChainConfig.mockReset();
-  chain.loadChainConfig.mockReturnValue(null);
-  chain.issueCredential.mockReset();
-  chain.revokeCredential.mockReset();
-  chain.credentialExpiryLedger.mockReset();
+  vi.restoreAllMocks();
+  vi.spyOn(chain, "loadChainConfig").mockReturnValue(null);
+  vi.spyOn(chain, "issueCredential");
+  vi.spyOn(chain, "revokeCredential");
+  vi.spyOn(chain, "credentialExpiryLedger");
 });
 
 afterEach(() => {

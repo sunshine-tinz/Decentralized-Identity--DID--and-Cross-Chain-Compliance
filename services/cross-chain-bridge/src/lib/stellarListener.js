@@ -11,7 +11,7 @@
 const fs = require("fs");
 const path = require("path");
 const { EventEmitter } = require("events");
-const { SorobanRpc, scValToNative } = require("@stellar/stellar-sdk");
+const { rpc, scValToNative } = require("@stellar/stellar-sdk");
 
 const TOPIC_NAMESPACE = "compliance";
 const TOPIC_ATTESTATION = "attestation";
@@ -46,7 +46,7 @@ class StellarListener extends EventEmitter {
     this.contractId = complianceContractId;
     this.pollIntervalMs = pollIntervalMs;
     this.cursorFile = cursorFile;
-    this.server = server || new SorobanRpc.Server(rpcUrl);
+    this.server = server || new rpc.Server(rpcUrl);
     this.onEventDurable = onEventDurable;
 
     this._cursor = null;

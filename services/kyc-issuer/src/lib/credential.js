@@ -81,7 +81,7 @@ function buildW3CVerifiableCredential({
     .createHash("sha256")
     .update(canonicalize(unsigned), "utf8")
     .digest("hex");
-  const signature = keypair.sign(Buffer.from(digestHex, "hex")).toString("base64");
+  const signature = Buffer.from(keypair.sign(Buffer.from(digestHex, "hex"))).toString("base64");
 
   return {
     vcHashHex: digestHex,
