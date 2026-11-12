@@ -1,6 +1,10 @@
 # Rust build artifacts
 target/
 
+# Foundry EVM artifacts
+contracts/evm/out/
+contracts/evm/cache/
+
 # Node.js
 node_modules/
 dist/
@@ -8,8 +12,10 @@ dist/
 # Soroban test snapshots (generated, not source)
 test_snapshots/
 
-# Cross-chain bridge cursor state
+# Cross-chain bridge state
 .bridge-cursor.json
+.bridge-queue.json
+.bridge-identities.json
 
 # Environment files
 .env
