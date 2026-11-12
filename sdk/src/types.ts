@@ -3,11 +3,58 @@
  * These mirror the Soroban contract data structures.
  */
 
+export interface ServiceEndpoint {
+  id: string;
+  serviceType: string;
+  endpoint: string;
+}
+
 export interface DIDDocument {
-  id: string; // did:stellar:<address>
+  id: string; // did:stellar:<anchor>
+  controller?: string; // current Stellar controller (G...)
+  recovery?: string | null; // optional recovery guardian (G...)
   documentHash: string; // hex-encoded content hash of the off-chain document
+  services?: ServiceEndpoint[];
+  version?: number;
   updatedAt: number; // ledger sequence
   active: boolean;
+}
+
+export interface W3CVerificationMethod {
+  id: string;
+  type: "Ed25519VerificationKey2020";
+  controller: string;
+  publicKeyMultibase: string;
+}
+
+export interface W3CServiceEndpoint {
+  id: string;
+  type: string;
+  serviceEndpoint: string;
+}
+
+export interface W3CDIDDocument {
+  "@context": string[];
+  id: string;
+  controller: string;
+  verificationMethod: W3CVerificationMethod[];
+  authentication: string[];
+  assertionMethod: string[];
+  service?: W3CServiceEndpoint[];
+}
+
+export interface W3CDIDResolutionResult {
+  didDocument: W3CDIDDocument;
+  didDocumentMetadata: {
+    deactivated: boolean;
+    versionId: string;
+    updatedLedger: number;
+    documentHash: string;
+    offchainIntegrityVerified?: boolean;
+  };
+  didResolutionMetadata: {
+    contentType: "application/did+ld+json";
+  };
 }
 
 export interface AttributeRing {
@@ -52,6 +99,24 @@ export interface SorobanServerLike {
   getAccount(accountId: string): Promise<unknown>;
   simulateTransaction(transaction: unknown): Promise<unknown>;
   prepareTransaction(transaction: unknown): Promise<unknown>;
+  sendTransaction?(transaction: unknown): Promise<{
+    status: string;
+    hash?: string;
+    errorResult?: unknown;
+  }>;
+  getTransaction?(hash: string): Promise<{
+    status: string;
+    ledger?: number;
+    returnValue?: unknown;
+    resultXdr?: unknown;
+  }>;
+}
+
+export interface SubmittedTransactionResult {
+  hash: string;
+  status: "SUCCESS";
+  ledger: number;
+  returnValue?: unknown;
 }
 
 export interface StellarDIDConfig {

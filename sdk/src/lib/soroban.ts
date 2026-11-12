@@ -16,7 +16,11 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 
-import { SorobanServerLike, StellarDIDConfig } from "../types";
+import {
+  SorobanServerLike,
+  StellarDIDConfig,
+  SubmittedTransactionResult,
+} from "../types";
 
 /** A syntactically valid source account used for read-only simulation. */
 const SIMULATION_SOURCE =
@@ -105,8 +109,117 @@ export async function buildPreparedTransaction(
   const server = getServer(config);
   const account = (await server.getAccount(config.publicKey)) as Account;
   const tx = buildTransaction(config, account, contractId, method, args);
+
+  // Explicitly simulate first so contract panics/auth errors surface before signing.
+  const sim = (await server.simulateTransaction(tx)) as { error?: string } | undefined;
+  if (sim?.error) {
+    throw new Error(`Simulation of ${method} failed: ${sim.error}`);
+  }
+
   const prepared = (await server.prepareTransaction(tx)) as { toXDR(): string };
   return prepared.toXDR();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Validate a signed transaction XDR, submit it to Soroban RPC, and poll until
+ * finality (`SUCCESS` or `FAILED`).
+ */
+export async function submitSignedTransaction(
+  config: StellarDIDConfig,
+  signedXdr: string,
+  options: { pollIntervalMs?: number; pollTimeoutMs?: number } = {}
+): Promise<SubmittedTransactionResult> {
+  if (typeof signedXdr !== "string" || signedXdr.trim().length === 0) {
+    throw new Error("Signed transaction XDR must be a non-empty string");
+  }
+
+  let parsedTx;
+  try {
+    parsedTx = TransactionBuilder.fromXDR(signedXdr.trim(), config.networkPassphrase);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Invalid signed transaction XDR: ${msg}`);
+  }
+
+  const server = getServer(config);
+  if (
+    typeof server.sendTransaction !== "function" ||
+    typeof server.getTransaction !== "function"
+  ) {
+    throw new Error("Configured Soroban server does not support transaction submission");
+  }
+
+  const pollIntervalMs = options.pollIntervalMs ?? 1500;
+  const pollTimeoutMs = options.pollTimeoutMs ?? 45_000;
+
+  let sent = await server.sendTransaction(parsedTx);
+  for (let attempt = 0; sent.status === "TRY_AGAIN_LATER" && attempt < 3; attempt += 1) {
+    await sleep(pollIntervalMs);
+    sent = await server.sendTransaction(parsedTx);
+  }
+
+  if (sent.status === "ERROR" || !sent.hash) {
+    throw new Error(
+      `Soroban RPC rejected transaction submission (status: ${sent.status ?? "unknown"})`
+    );
+  }
+
+  const deadline = Date.now() + pollTimeoutMs;
+  while (Date.now() < deadline) {
+    let receipt: {
+      status: string;
+      ledger?: number;
+      returnValue?: unknown;
+      resultXdr?: unknown;
+    };
+    try {
+      receipt = await server.getTransaction(sent.hash);
+    } catch (err) {
+      if (String((err as Error)?.message).includes("Bad union switch") && config.rpcUrl) {
+        const res = await fetch(config.rpcUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "getTransaction",
+            params: { hash: sent.hash },
+          }),
+        });
+        const json = (await res.json()) as { result?: typeof receipt };
+        if (!json.result) throw err;
+        receipt = json.result;
+      } else {
+        throw err;
+      }
+    }
+    if (receipt.status === "SUCCESS") {
+      let decoded: unknown;
+      if (receipt.returnValue) {
+        try {
+          decoded = scValToNative(receipt.returnValue as xdr.ScVal);
+        } catch {
+          decoded = undefined;
+        }
+      }
+      return {
+        hash: sent.hash,
+        status: "SUCCESS",
+        ledger: Number(receipt.ledger ?? 0),
+        returnValue: decoded,
+      };
+    }
+    if (receipt.status === "FAILED") {
+      throw new Error(`Transaction ${sent.hash} failed on-chain`);
+    }
+    await sleep(pollIntervalMs);
+  }
+
+  throw new Error(`Timed out waiting for confirmation of transaction ${sent.hash}`);
 }
 
 /**

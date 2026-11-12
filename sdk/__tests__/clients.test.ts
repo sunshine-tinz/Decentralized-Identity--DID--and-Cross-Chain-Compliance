@@ -1,7 +1,16 @@
+import crypto from "crypto";
 import { Account, Keypair, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { DIDClient } from "../src/clients/DIDClient";
 import { VCClient } from "../src/clients/VCClient";
 import { ComplianceClient } from "../src/clients/ComplianceClient";
+import { submitSignedTransaction } from "../src/lib/soroban";
+import { resolveW3CDID } from "../src/resolver/DIDResolver";
+import {
+  hashUnsignedCredential,
+  signW3CCredential,
+  validateW3CCredentialSchema,
+  verifyW3CCredential,
+} from "../src/vc/W3CVerifiableCredential";
 import { StellarDIDConfig } from "../src/types";
 
 const CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
@@ -189,5 +198,164 @@ describe("ComplianceClient", () => {
     expect(attestation.evaluatedAt).toBe(999);
     expect(attestation.policyVersion).toBe(3);
     expect(attestation.verifier).toBe(CONTRACT);
+  });
+
+  it("submits a valid signed transaction and polls until SUCCESS", async () => {
+    const server = {
+      ...serverReturning(nativeToScVal(true)),
+      sendTransaction: jest.fn(async () => ({ status: "PENDING", hash: "tx-hash-1" })),
+      getTransaction: jest
+        .fn()
+        .mockResolvedValueOnce({ status: "NOT_FOUND" })
+        .mockResolvedValueOnce({
+          status: "SUCCESS",
+          ledger: 4242,
+          returnValue: nativeToScVal("did:stellar:" + PUBKEY),
+        }),
+    };
+
+    const client = new DIDClient(configWith(server, { publicKey: PUBKEY }));
+    const xdrStr = await client.register(PUBKEY, "ab".repeat(32));
+    const receipt = await submitSignedTransaction(configWith(server), xdrStr, {
+      pollIntervalMs: 1,
+      pollTimeoutMs: 500,
+    });
+
+    expect(receipt.hash).toBe("tx-hash-1");
+    expect(receipt.status).toBe("SUCCESS");
+    expect(receipt.ledger).toBe(4242);
+    expect(receipt.returnValue).toBe("did:stellar:" + PUBKEY);
+  });
+
+  it("rejects invalid XDR and failed RPC submissions", async () => {
+    const server = {
+      ...serverReturning(nativeToScVal(true)),
+      sendTransaction: jest.fn(async () => ({ status: "ERROR" })),
+      getTransaction: jest.fn(),
+    };
+
+    await expect(submitSignedTransaction(configWith(server), "not-valid-xdr")).rejects.toThrow(
+      /Invalid signed transaction XDR/
+    );
+
+    const client = new DIDClient(configWith(server, { publicKey: PUBKEY }));
+    const xdrStr = await client.register(PUBKEY, "ab".repeat(32));
+    await expect(submitSignedTransaction(configWith(server), xdrStr)).rejects.toThrow(
+      /rejected transaction submission/
+    );
+  });
+});
+
+describe("W3C DID Core Resolver & Verifiable Credentials", () => {
+  it("resolves an on-chain DID anchor into a W3C DID Core document and verifies off-chain hash", async () => {
+    const controller = Keypair.random().publicKey();
+    const didId = `did:stellar:${controller}`;
+    const offchainDoc = JSON.stringify({ id: didId, service: [] });
+    const docHash = crypto.createHash("sha256").update(offchainDoc).digest();
+
+    const retval = struct({
+      id: nativeToScVal(didId),
+      controller: nativeToScVal(controller, { type: "address" }),
+      document_hash: nativeToScVal(docHash, { type: "bytes" }),
+      services: xdr.ScVal.scvVec([
+        struct({
+          id: nativeToScVal("#kyc"),
+          service_type: nativeToScVal("KYCService"),
+          endpoint: nativeToScVal("https://kyc.example.org"),
+        }),
+      ]),
+      version: nativeToScVal(2, { type: "u32" }),
+      updated_at: nativeToScVal(5555, { type: "u32" }),
+      active: nativeToScVal(true, { type: "bool" }),
+    });
+
+    const resolved = await resolveW3CDID(configWith(serverReturning(retval)), didId, {
+      offchainDocument: offchainDoc,
+    });
+
+    expect(resolved.didDocument["@context"]).toContain("https://www.w3.org/ns/did/v1");
+    expect(resolved.didDocument.id).toBe(didId);
+    expect(resolved.didDocument.verificationMethod[0].type).toBe("Ed25519VerificationKey2020");
+    expect(resolved.didDocument.verificationMethod[0].publicKeyMultibase.startsWith("z")).toBe(
+      true
+    );
+    expect(resolved.didDocument.service?.[0].id).toBe(`${didId}#kyc`);
+    expect(resolved.didDocumentMetadata.versionId).toBe("2");
+    expect(resolved.didDocumentMetadata.offchainIntegrityVerified).toBe(true);
+  });
+
+  it("signs, validates schema, and verifies W3C Verifiable Credentials against forgery, substitution, expiry, and revocation", async () => {
+    const issuerKp = Keypair.random();
+    const attackerKp = Keypair.random();
+    const subjectKp = Keypair.random();
+
+    const unsigned = {
+      "@context": [
+        "https://www.w3.org/2018/credentials/v1",
+        "https://w3id.org/security/suites/ed25519-2020/v1",
+      ],
+      id: "urn:uuid:11111111-1111-4111-8111-111111111111",
+      type: ["VerifiableCredential", "KYCComplianceCredential"],
+      issuer: `did:stellar:${issuerKp.publicKey()}`,
+      issuanceDate: "2026-01-01T00:00:00.000Z",
+      expirationDate: "2027-01-01T00:00:00.000Z",
+      credentialSubject: {
+        id: `did:stellar:${subjectKp.publicKey()}`,
+        attributes: { kyc_passed: true },
+      },
+      credentialStatus: {
+        id: `stellar:soroban:${CONTRACT}#${subjectKp.publicKey()}:kyc_passed`,
+        type: "SorobanCredentialStatus2026" as const,
+        contractId: CONTRACT,
+        subject: subjectKp.publicKey(),
+        attributes: ["kyc_passed"],
+        expiresAtLedger: 6_000_000,
+      },
+    };
+
+    const signed = signW3CCredential(unsigned, issuerKp.secret());
+    expect(validateW3CCredentialSchema(signed).ok).toBe(true);
+
+    const expectedDigest = hashUnsignedCredential(unsigned);
+    const validRes = await verifyW3CCredential(signed, {
+      now: new Date("2026-06-01T00:00:00.000Z"),
+    });
+    expect(validRes.valid).toBe(true);
+    expect(validRes.digestHex).toBe(expectedDigest);
+
+    // Tampered claim fails signature
+    const tampered = {
+      ...signed,
+      credentialSubject: {
+        ...signed.credentialSubject,
+        attributes: { kyc_passed: true, accredited_investor: true },
+      },
+    };
+    expect((await verifyW3CCredential(tampered, { now: new Date("2026-06-01T00:00:00.000Z") })).valid).toBe(
+      false
+    );
+
+    // Issuer substitution fails
+    const substituted = {
+      ...signed,
+      issuer: `did:stellar:${attackerKp.publicKey()}`,
+    };
+    expect(
+      (await verifyW3CCredential(substituted, { now: new Date("2026-06-01T00:00:00.000Z") })).valid
+    ).toBe(false);
+
+    // Expired VC fails
+    expect(
+      (await verifyW3CCredential(signed, { now: new Date("2028-01-01T00:00:00.000Z") })).valid
+    ).toBe(false);
+
+    // Revoked on-chain status fails
+    const revokedVcClient = new VCClient(configWith(serverReturning(nativeToScVal(false))));
+    const revokedCheck = await verifyW3CCredential(signed, {
+      now: new Date("2026-06-01T00:00:00.000Z"),
+      vcClient: revokedVcClient,
+    });
+    expect(revokedCheck.valid).toBe(false);
+    expect(revokedCheck.reason).toMatch(/revoked/i);
   });
 });

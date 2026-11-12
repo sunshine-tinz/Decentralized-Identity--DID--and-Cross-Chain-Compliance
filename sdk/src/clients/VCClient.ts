@@ -13,6 +13,7 @@ import { Address, nativeToScVal } from "@stellar/stellar-sdk";
 import { AttributeRing, Credential, RingSignature, StellarDIDConfig } from "../types";
 import {
   buildPreparedTransaction,
+  bytesArg,
   simulateRead,
   symbolArg,
   toHex,
@@ -87,6 +88,47 @@ export class VCClient {
         nativeToScVal(expiresAt, { type: "u32" }),
       ]
     );
+  }
+
+  /**
+   * Issuer records an attested credential anchored to a 32-byte SHA-256 W3C VC digest.
+   */
+  async issueCredentialAnchored(
+    issuer: string,
+    subject: string,
+    attribute: string,
+    expiresAt: number,
+    vcHashHex: string
+  ): Promise<string> {
+    if (!/^[0-9a-fA-F]{64}$/.test(vcHashHex)) {
+      throw new Error("vcHashHex must be a 64-character SHA-256 hex digest");
+    }
+    return buildPreparedTransaction(
+      this.config,
+      this.config.vcVerifierId,
+      "issue_credential_anchored",
+      [
+        Address.fromString(issuer).toScVal(),
+        Address.fromString(subject).toScVal(),
+        symbolArg(attribute),
+        nativeToScVal(expiresAt, { type: "u32" }),
+        bytesArg(vcHashHex, "vcHashHex"),
+      ]
+    );
+  }
+
+  /**
+   * Read the anchored 32-byte W3C VC SHA-256 digest, if present.
+   */
+  async getCredentialHash(subject: string, attribute: string): Promise<string | null> {
+    const raw = await simulateRead(
+      this.config,
+      this.config.vcVerifierId,
+      "get_credential_hash",
+      [Address.fromString(subject).toScVal(), symbolArg(attribute)]
+    );
+    if (!raw) return null;
+    return toHex(raw);
   }
 
   /**

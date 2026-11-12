@@ -129,4 +129,17 @@ export class ComplianceClient {
       verifier: raw.verifier,
     };
   }
+
+  /**
+   * Build and prepare an unsigned transaction for `export_attestation` so the
+   * `compliance::attestation` event is committed on-chain for bridge relay.
+   */
+  async buildExportAttestationTx(subject: string, policy: string): Promise<string> {
+    return buildPreparedTransaction(
+      this.config,
+      this.config.complianceEngineId,
+      "export_attestation",
+      [Address.fromString(subject).toScVal(), symbolArg(policy)]
+    );
+  }
 }

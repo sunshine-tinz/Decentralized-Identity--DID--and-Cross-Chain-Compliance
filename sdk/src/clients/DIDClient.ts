@@ -1,19 +1,49 @@
 /**
  * DIDClient — interact with the DID Registry Soroban contract.
- *
- * Reads are simulated against Soroban RPC. Writes are assembled and prepared,
- * then returned as unsigned XDR for the caller to sign — the SDK never holds a
- * secret key.
  */
 
-import { Address } from "@stellar/stellar-sdk";
-import { DIDDocument, StellarDIDConfig } from "../types";
+import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
+import { DIDDocument, ServiceEndpoint, StellarDIDConfig } from "../types";
 import {
   buildPreparedTransaction,
   bytesArg,
   simulateRead,
   toHex,
 } from "../lib/soroban";
+
+interface RawServiceEndpoint {
+  id: string;
+  service_type: string;
+  endpoint: string;
+}
+
+interface RawDIDDocument {
+  id: string;
+  controller?: string;
+  recovery?: string | null;
+  document_hash: unknown;
+  services?: RawServiceEndpoint[];
+  version?: number;
+  updated_at: number;
+  active: boolean;
+}
+
+function mapRawDid(raw: RawDIDDocument): DIDDocument {
+  return {
+    id: raw.id,
+    controller: raw.controller,
+    recovery: raw.recovery ?? null,
+    documentHash: toHex(raw.document_hash),
+    services: (raw.services ?? []).map((s) => ({
+      id: s.id,
+      serviceType: s.service_type,
+      endpoint: s.endpoint,
+    })),
+    version: raw.version !== undefined ? Number(raw.version) : undefined,
+    updatedAt: Number(raw.updated_at),
+    active: Boolean(raw.active),
+  };
+}
 
 export class DIDClient {
   private config: StellarDIDConfig;
@@ -22,13 +52,6 @@ export class DIDClient {
     this.config = config;
   }
 
-  /**
-   * Register a new DID for the given controller address.
-   *
-   * @param controllerAddress - Stellar address (G...)
-   * @param documentHash      - hex-encoded content hash of the off-chain DID document
-   * @returns unsigned, prepared transaction XDR
-   */
   async register(controllerAddress: string, documentHash: string): Promise<string> {
     return buildPreparedTransaction(this.config, this.config.didRegistryId, "register", [
       Address.fromString(controllerAddress).toScVal(),
@@ -36,11 +59,6 @@ export class DIDClient {
     ]);
   }
 
-  /**
-   * Replace the anchored document hash for an existing DID.
-   *
-   * @returns unsigned, prepared transaction XDR
-   */
   async update(controllerAddress: string, newDocumentHash: string): Promise<string> {
     return buildPreparedTransaction(this.config, this.config.didRegistryId, "update", [
       Address.fromString(controllerAddress).toScVal(),
@@ -48,11 +66,67 @@ export class DIDClient {
     ]);
   }
 
-  /**
-   * Deactivate a DID. Irreversible.
-   *
-   * @returns unsigned, prepared transaction XDR
-   */
+  async updateById(didId: string, newDocumentHash: string): Promise<string> {
+    return buildPreparedTransaction(this.config, this.config.didRegistryId, "update_by_id", [
+      nativeToScVal(didId, { type: "string" }),
+      bytesArg(newDocumentHash, "newDocumentHash"),
+    ]);
+  }
+
+  async rotateController(didId: string, newControllerAddress: string): Promise<string> {
+    return buildPreparedTransaction(
+      this.config,
+      this.config.didRegistryId,
+      "rotate_controller",
+      [
+        nativeToScVal(didId, { type: "string" }),
+        Address.fromString(newControllerAddress).toScVal(),
+      ]
+    );
+  }
+
+  async setRecovery(didId: string, recoveryAddress: string | null): Promise<string> {
+    const recoveryVal = recoveryAddress
+      ? Address.fromString(recoveryAddress).toScVal()
+      : xdr.ScVal.scvVoid();
+    return buildPreparedTransaction(this.config, this.config.didRegistryId, "set_recovery", [
+      nativeToScVal(didId, { type: "string" }),
+      recoveryVal,
+    ]);
+  }
+
+  async recover(didId: string, newControllerAddress: string): Promise<string> {
+    return buildPreparedTransaction(this.config, this.config.didRegistryId, "recover", [
+      nativeToScVal(didId, { type: "string" }),
+      Address.fromString(newControllerAddress).toScVal(),
+    ]);
+  }
+
+  async setServices(didId: string, services: ServiceEndpoint[]): Promise<string> {
+    const servicesScVal = xdr.ScVal.scvVec(
+      services.map((svc) =>
+        xdr.ScVal.scvMap([
+          new xdr.ScMapEntry({
+            key: nativeToScVal("endpoint", { type: "symbol" }),
+            val: nativeToScVal(svc.endpoint, { type: "string" }),
+          }),
+          new xdr.ScMapEntry({
+            key: nativeToScVal("id", { type: "symbol" }),
+            val: nativeToScVal(svc.id, { type: "string" }),
+          }),
+          new xdr.ScMapEntry({
+            key: nativeToScVal("service_type", { type: "symbol" }),
+            val: nativeToScVal(svc.serviceType, { type: "string" }),
+          }),
+        ])
+      )
+    );
+    return buildPreparedTransaction(this.config, this.config.didRegistryId, "set_services", [
+      nativeToScVal(didId, { type: "string" }),
+      servicesScVal,
+    ]);
+  }
+
   async deactivate(controllerAddress: string): Promise<string> {
     return buildPreparedTransaction(
       this.config,
@@ -62,24 +136,19 @@ export class DIDClient {
     );
   }
 
-  /**
-   * Resolve a DID document by controller address.
-   */
   async resolve(controllerAddress: string): Promise<DIDDocument> {
     const raw = (await simulateRead(this.config, this.config.didRegistryId, "resolve", [
       Address.fromString(controllerAddress).toScVal(),
-    ])) as {
-      id: string;
-      document_hash: unknown;
-      updated_at: number;
-      active: boolean;
-    };
+    ])) as RawDIDDocument;
 
-    return {
-      id: raw.id,
-      documentHash: toHex(raw.document_hash),
-      updatedAt: Number(raw.updated_at),
-      active: Boolean(raw.active),
-    };
+    return mapRawDid(raw);
+  }
+
+  async resolveById(didId: string): Promise<DIDDocument> {
+    const raw = (await simulateRead(this.config, this.config.didRegistryId, "resolve_by_id", [
+      nativeToScVal(didId, { type: "string" }),
+    ])) as RawDIDDocument;
+
+    return mapRawDid(raw);
   }
 }
