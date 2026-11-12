@@ -40,6 +40,15 @@ jobs:
         run: cargo test --locked
       - name: WASM build
         run: cargo build --target wasm32-unknown-unknown --release --locked
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+      - name: Rust dependency audit (verify wasm32 excludes host-only advisories)
+        run: |
+          if cargo tree --locked --target wasm32-unknown-unknown -i crypto-bigint 2>/dev/null | grep -q 'crypto-bigint'; then
+            echo "crypto-bigint unexpectedly linked into wasm32 contract target!"
+            exit 1
+          fi
+          cargo audit --ignore RUSTSEC-2026-0387 --ignore RUSTSEC-2024-0436
       - name: Upload WASM artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -74,8 +83,8 @@ jobs:
           cache-dependency-path: services/kyc-issuer/package-lock.json
       - run: npm ci
       - run: npm test
-      - name: Dependency audit (runtime critical gate)
-        run: npm audit --omit=dev --audit-level=critical
+      - name: Dependency audit (zero vulnerabilities gate)
+        run: npm audit
 
   cross-chain-bridge:
     name: Cross-Chain Bridge
@@ -92,8 +101,8 @@ jobs:
           cache-dependency-path: services/cross-chain-bridge/package-lock.json
       - run: npm ci
       - run: npm test
-      - name: Dependency audit (runtime critical gate)
-        run: npm audit --omit=dev --audit-level=critical
+      - name: Dependency audit (zero vulnerabilities gate)
+        run: npm audit
 
   sdk:
     name: TypeScript SDK
@@ -112,8 +121,8 @@ jobs:
       - run: npm run build
       - run: npm test
       - run: npm run lint
-      - name: Dependency audit (runtime critical gate)
-        run: npm audit --omit=dev --audit-level=critical
+      - name: Dependency audit (zero vulnerabilities gate)
+        run: npm audit
 
   frontend:
     name: Frontend
@@ -137,8 +146,8 @@ jobs:
       - run: npm run lint
       - run: npm test -- --run
       - run: npm run build
-      - name: Dependency audit (runtime critical gate)
-        run: npm audit --omit=dev --audit-level=critical
+      - name: Dependency audit (zero vulnerabilities gate)
+        run: npm audit
 
   security-scan:
     name: Secret & Hygiene Scan

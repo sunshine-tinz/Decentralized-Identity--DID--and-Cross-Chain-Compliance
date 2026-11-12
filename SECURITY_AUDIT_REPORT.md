@@ -28,15 +28,18 @@ This remediation addressed the high-impact implementation and verification gaps 
 
 ---
 
-## 2. Dependency & Secret Hygiene Audit (`npm audit` & Secret Scan)
+## 2. Dependency & Secret Hygiene Audit (`npm audit`, `cargo-audit` & Secret Scan)
 
 * **Secret scan:** Zero `.env`, `.pem`, or `.key` files tracked in git; zero leaked Stellar `S...` secret keys or PEM private key blocks.
-* **Non-breaking dependency fixes:** Applied `npm audit fix` across all 4 Node packages (resolving `tmp` high advisory in `cross-chain-bridge` and `minimatch`/moderate advisories in `kyc-issuer`).
-* **Remaining documented advisories (require breaking major upgrades):**
-  - `@stellar/stellar-sdk` (`<=15.1.0`) → `toml` (`high`, prototype pollution / DoS in TOML parser; fix requires `@stellar/stellar-sdk@17.4.0`). Impact: low in current code because `StellarToml` parsing is not invoked by Soroban RPC or SEP-10 `WebAuth`.
-  - `frontend` devDependencies: `tinypool` (`critical`), `vite`/`esbuild` (`high`/`moderate`) require `vitest@5.1.0` / `vite@8.3.8`; `react-router-dom` (`moderate` SSR/open-redirect advisory) requires v7.
-  - `jest` (`<=29.7.0`) devDependencies: `deepmerge` moderate advisory.
-* **`cargo audit`:** Not installed locally in this environment; Rust crates remain pinned via `contracts/Cargo.lock`.
+* **Node.js `npm audit` (ALL 4 packages clean):**
+  - Upgraded `@stellar/stellar-sdk` from `^12.0.0` to `^17.4.0` across `sdk`, `frontend`, `services/kyc-issuer`, and `services/cross-chain-bridge` (eliminating `toml <=5.0.0` HIGH advisory).
+  - Upgraded `frontend` to `react-router-dom@^7.18.5`, `vite@^8.3.8`, `@vitejs/plugin-react@^6.3.0`, and `vitest@^5.1.0` (eliminating `tinypool` CRITICAL, `esbuild` MODERATE, and `react-router` MODERATE advisories).
+  - Migrated `sdk`, `services/kyc-issuer`, and `services/cross-chain-bridge` test/dev runners from `jest`/`nodemon` to `vitest@^5.1.0` + built-in `node --watch`, with targeted overrides (`minimatch@^11.0.8` for `typescript-eslint`, `tmp@^0.2.7` for `solc`).
+  - Result: **`found 0 vulnerabilities`** in `npm audit` across all 4 packages (`sdk`, `frontend`, `services/kyc-issuer`, `services/cross-chain-bridge`), enforced by CI.
+* **Rust `cargo-audit` (`cargo-audit v0.23.0` on `contracts/Cargo.lock`, 172 crate dependencies):**
+  - `cargo audit` reported `RUSTSEC-2026-0387` (`crypto-bigint v0.5.5`), `RUSTSEC-2024-0436` (`paste v1.0.15`, unmaintained warning), and yanked `spin v0.9.8` warning.
+  - `cargo tree --locked --target wasm32-unknown-unknown` confirms `crypto-bigint`, `paste`, and `spin` are **absent from the `wasm32-unknown-unknown` contract bytecode**; all three stem strictly from `soroban-env-host v21.2.1` (Soroban testutils/host VM pulled via `soroban-sdk v21.7.7`).
+  - `.github/workflows/ci.yml` enforces both that `crypto-bigint` never links into `--target wasm32-unknown-unknown` and runs `cargo audit --ignore RUSTSEC-2026-0387 --ignore RUSTSEC-2024-0436`.
 
 ---
 
