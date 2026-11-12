@@ -69,7 +69,10 @@ function validateKycRequest(body) {
   if (typeof subject !== "string" || !StrKey.isValidEd25519PublicKey(subject)) {
     return { ok: false, error: "Invalid subject address" };
   }
-  if (typeof issuerPubkey !== "string" || !HEX_PUBKEY_RE.test(issuerPubkey)) {
+  if (
+    typeof issuerPubkey !== "string" ||
+    (!HEX_PUBKEY_RE.test(issuerPubkey) && !StrKey.isValidEd25519PublicKey(issuerPubkey))
+  ) {
     return { ok: false, error: "Invalid issuerPubkey" };
   }
   if (!Array.isArray(attributes) || attributes.length === 0) {
@@ -117,7 +120,9 @@ function validateKycRequest(body) {
     value: {
       userId,
       subject,
-      issuerPubkey: issuerPubkey.toLowerCase(),
+      issuerPubkey: StrKey.isValidEd25519PublicKey(issuerPubkey)
+        ? issuerPubkey
+        : issuerPubkey.toLowerCase(),
       attributes: [...unique],
       personalInfo: personalInfo || {},
       documentPhoto: documentPhoto || null,

@@ -18,7 +18,7 @@ function rateLimit({ windowMs = 60_000, max = 30, keyFn } = {}) {
   /** @type {Map<string, {count: number, reset: number}>} */
   const hits = new Map();
 
-  return function rateLimitMiddleware(req, res, next) {
+  function rateLimitMiddleware(req, res, next) {
     const key = keyFn ? keyFn(req) : req.ip || "unknown";
     const now = Date.now();
 
@@ -43,7 +43,10 @@ function rateLimit({ windowMs = 60_000, max = 30, keyFn } = {}) {
     }
 
     return next();
-  };
+  }
+
+  rateLimitMiddleware.reset = () => hits.clear();
+  return rateLimitMiddleware;
 }
 
 module.exports = { rateLimit };

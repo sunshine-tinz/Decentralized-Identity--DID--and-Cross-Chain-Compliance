@@ -1,33 +1,23 @@
 /**
  * Issuer dashboard routes (issuer-facing)
  *
- * GET  /api/issuer/requests   — list pending requests for the authenticated issuer
- * POST /api/issuer/approve    — approve a request and issue a credential
- * POST /api/issuer/reject     — reject a request
- *
- * All routes require a valid issuer API key (`x-issuer-key`). The issuer's public
- * key is resolved server-side from that key, so a caller cannot act as an issuer
- * by quoting a public key. No private key material is accepted over HTTP.
- *
- * Approval submits `VCVerifier.issue_credential` for every requested attribute
- * using the server-held issuer key. If chain configuration is absent, issuance
- * fails closed with 503 unless PLACEHOLDER_ISSUANCE_ENABLED=true, in which case
- * the local, explicitly non-verifiable placeholder is produced instead (for
- * plumbing tests only).
- *
- * Storage remains in-memory (see store.js).
+ * GET  /api/issuer/requests         — list pending requests for the authenticated issuer (redacted)
+ * GET  /api/issuer/requests/:id/pii — decrypt PII for authorized issuer review only
+ * POST /api/issuer/approve          — approve a request and issue credentials atomically
+ * POST /api/issuer/reject           — reject a request and scrub PII
  */
 
 "use strict";
 
 const { Router } = require("express");
 const store = require("../store");
-const { buildCredential } = require("../lib/credential");
+const { buildCredential, buildW3CVerifiableCredential } = require("../lib/credential");
 const { requireIssuer } = require("../lib/auth");
 const { validateReason } = require("../lib/validate");
 const {
   loadChainConfig,
   issueCredential,
+  revokeCredential,
   credentialExpiryLedger,
 } = require("../lib/chain");
 
@@ -35,11 +25,6 @@ const router = Router();
 
 router.use(requireIssuer);
 
-/**
- * Project a stored request down to non-sensitive review metadata.
- * Personal information and documents are deliberately never included.
- * @param {object} request
- */
 function toReviewView(request) {
   return {
     requestId: request.requestId,
@@ -48,14 +33,13 @@ function toReviewView(request) {
     attributes: request.attributes,
     status: request.status,
     createdAt: request.createdAt,
-    hasDocument: Boolean(request.documentPhoto),
+    hasDocument: Boolean(request.hasDocument),
+    piiPurged: Boolean(request.piiPurged),
   };
 }
 
-/**
- * List pending KYC requests for the authenticated issuer.
- */
 router.get("/requests", (req, res) => {
+  store.purgeExpired();
   const { pubkey } = req.issuer;
 
   const pending = [...store.kycRequests.values()]
@@ -65,12 +49,35 @@ router.get("/requests", (req, res) => {
   return res.json(pending);
 });
 
-/**
- * Approve a KYC request.
- *
- * Body: { requestId }
- */
+router.get("/requests/:requestId/pii", (req, res) => {
+  store.purgeExpired();
+  const kycReq = store.kycRequests.get(req.params.requestId);
+  if (!kycReq) return res.status(404).json({ error: "Request not found" });
+
+  if (kycReq.issuerPubkey !== req.issuer.pubkey) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  if (kycReq.piiPurged) {
+    return res.status(410).json({ error: "PII purged under retention policy" });
+  }
+
+  try {
+    const pii = store.decryptRequestPii(kycReq);
+    return res.json({
+      requestId: kycReq.requestId,
+      subject: kycReq.subject,
+      personalInfo: pii.personalInfo,
+      documentPhoto: pii.documentPhoto,
+    });
+  } catch (err) {
+    console.error("Failed to decrypt PII for issuer review:", err && err.message);
+    return res.status(500).json({ error: "Failed to decrypt request PII" });
+  }
+});
+
 router.post("/approve", async (req, res) => {
+  store.purgeExpired();
   const { requestId } = req.body || {};
   if (typeof requestId !== "string" || !requestId) {
     return res.status(400).json({ error: "requestId required" });
@@ -83,23 +90,24 @@ router.post("/approve", async (req, res) => {
     return res.status(403).json({ error: "Forbidden" });
   }
 
-  // Only `pending` may be approved; prevents double issuance and reviving a
-  // rejected request.
   if (kycReq.status !== "pending") {
     return res.status(409).json({ error: `Request is already ${kycReq.status}` });
   }
 
-  const chain = loadChainConfig();
+  let chain;
+  try {
+    chain = loadChainConfig(process.env, req.issuer.pubkey);
+  } catch (err) {
+    console.error("Chain configuration mismatch:", err && err.message);
+    return res.status(500).json({ error: "Issuer signing identity mismatch" });
+  }
+
   const placeholderEnabled = process.env.PLACEHOLDER_ISSUANCE_ENABLED === "true";
   if (!chain && !placeholderEnabled) {
     return res.status(503).json({ error: "Credential issuance is not configured" });
   }
 
   if (chain) {
-    // One transaction per attribute: the contract issues a single credential per
-    // call. If a later attribute fails, earlier ones are already on-chain; the
-    // request stays pending and a retry is safe because the issuer of record may
-    // refresh its own attestation.
     let expiresAtLedger;
     const transactions = [];
     try {
@@ -114,21 +122,57 @@ router.post("/approve", async (req, res) => {
       }
     } catch (err) {
       console.error("On-chain issuance failed:", err.message);
-      return res.status(502).json({ error: "On-chain credential issuance failed" });
+      // Compensating rollback for partial multi-attribute issuance.
+      const rollbackFailures = [];
+      for (const issued of transactions) {
+        try {
+          await revokeCredential(chain, {
+            subject: kycReq.subject,
+            attribute: issued.attribute,
+          });
+        } catch (rbErr) {
+          rollbackFailures.push(issued.attribute);
+          console.error(
+            `Compensating revocation failed for ${issued.attribute}:`,
+            rbErr && rbErr.message
+          );
+        }
+      }
+      return res.status(502).json({
+        error: "On-chain credential issuance failed",
+        rolledBack: rollbackFailures.length === 0,
+      });
     }
 
     kycReq.status = "approved";
     kycReq.decidedAt = Date.now();
 
-    store.issuedCredentials.set(kycReq.retrievalToken, {
-      scheme: "issuer-attested-soroban",
-      verifiable: true,
-      contractId: chain.contractId,
-      issuer: chain.address,
+    const w3cBundle =
+      chain.keypair && typeof chain.keypair.sign === "function"
+        ? buildW3CVerifiableCredential({
+            requestId: kycReq.requestId,
+            subject: kycReq.subject,
+            attributes: kycReq.attributes,
+            keypair: chain.keypair,
+            contractId: chain.contractId,
+            expiresAtLedger,
+          })
+        : null;
+
+    store.saveIssuedCredential(kycReq.retrievalToken, {
+      requestId: kycReq.requestId,
       subject: kycReq.subject,
-      attributes: kycReq.attributes,
-      expiresAtLedger,
-      transactions,
+      credential: {
+        scheme: "issuer-attested-soroban",
+        verifiable: true,
+        contractId: chain.contractId,
+        issuer: chain.address,
+        subject: kycReq.subject,
+        attributes: kycReq.attributes,
+        expiresAtLedger,
+        transactions,
+        ...(w3cBundle || {}),
+      },
     });
 
     return res.json({
@@ -145,21 +189,23 @@ router.post("/approve", async (req, res) => {
     kycReq.status = "approved";
     kycReq.decidedAt = Date.now();
 
-    store.issuedCredentials.set(kycReq.retrievalToken, credential);
+    store.saveIssuedCredential(kycReq.retrievalToken, {
+      requestId: kycReq.requestId,
+      subject: kycReq.subject,
+      credential,
+    });
 
-    return res.json({ success: true, onChain: false, attributeCount: kycReq.attributes.length });
+    return res.json({
+      success: true,
+      onChain: false,
+      attributeCount: kycReq.attributes.length,
+    });
   } catch (err) {
-    // Never echo internal error details to the client.
     console.error("Credential issuance failed:", err.message);
     return res.status(500).json({ error: "Credential issuance failed" });
   }
 });
 
-/**
- * Reject a KYC request.
- *
- * Body: { requestId, reason? }
- */
 router.post("/reject", (req, res) => {
   const { requestId, reason } = req.body || {};
   if (typeof requestId !== "string" || !requestId) {
@@ -183,6 +229,7 @@ router.post("/reject", (req, res) => {
   kycReq.status = "rejected";
   kycReq.rejectionReason = reasonCheck.value;
   kycReq.decidedAt = Date.now();
+  store.scrubRequestPii(requestId);
 
   return res.json({ success: true });
 });

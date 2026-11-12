@@ -20,6 +20,84 @@
 
 const crypto = require("crypto");
 
+function canonicalize(value) {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalize(item)).join(",")}]`;
+  }
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalize(value[k])}`).join(",")}}`;
+}
+
+/**
+ * Build and sign a W3C Verifiable Credential Data Model envelope backed by
+ * Soroban on-chain status (`VCVerifier`).
+ */
+function buildW3CVerifiableCredential({
+  requestId,
+  subject,
+  attributes,
+  keypair,
+  contractId,
+  expiresAtLedger,
+}) {
+  const issuedAt = new Date();
+  const expiresAt = new Date(issuedAt.getTime() + ttlDays() * 24 * 60 * 60 * 1000);
+  const issuerDid = `did:stellar:${keypair.publicKey()}`;
+  const subjectDid = `did:stellar:${subject}`;
+
+  const attributeClaims = {};
+  for (const attr of attributes) {
+    attributeClaims[attr] = true;
+  }
+
+  const unsigned = {
+    "@context": [
+      "https://www.w3.org/2018/credentials/v1",
+      "https://w3id.org/security/suites/ed25519-2020/v1",
+    ],
+    id: `urn:uuid:${requestId}`,
+    type: ["VerifiableCredential", "KYCComplianceCredential"],
+    issuer: issuerDid,
+    issuanceDate: issuedAt.toISOString(),
+    expirationDate: expiresAt.toISOString(),
+    credentialSubject: {
+      id: subjectDid,
+      attributes: attributeClaims,
+    },
+    credentialStatus: {
+      id: `stellar:soroban:${contractId}#${subject}:${attributes.join(",")}`,
+      type: "SorobanCredentialStatus2026",
+      contractId,
+      subject,
+      attributes: [...attributes],
+      expiresAtLedger,
+    },
+  };
+
+  const digestHex = crypto
+    .createHash("sha256")
+    .update(canonicalize(unsigned), "utf8")
+    .digest("hex");
+  const signature = keypair.sign(Buffer.from(digestHex, "hex")).toString("base64");
+
+  return {
+    vcHashHex: digestHex,
+    verifiableCredential: {
+      ...unsigned,
+      proof: {
+        type: "Ed25519Signature2020",
+        created: issuedAt.toISOString(),
+        verificationMethod: `${issuerDid}#key-1`,
+        proofPurpose: "assertionMethod",
+        proofValue: signature,
+      },
+    },
+  };
+}
+
 const RING_SIZE = 5; // 1 real user + 4 decoys
 const DEFAULT_TTL_DAYS = 90;
 
@@ -97,4 +175,11 @@ async function buildCredential(kycReq) {
   };
 }
 
-module.exports = { buildCredential, generatePlaceholderKeypair, buildRing, ttlDays, RING_SIZE };
+module.exports = {
+  buildCredential,
+  buildW3CVerifiableCredential,
+  generatePlaceholderKeypair,
+  buildRing,
+  ttlDays,
+  RING_SIZE,
+};

@@ -1,38 +1,32 @@
 /**
  * Issuer authentication.
  *
- * Issuers authenticate with a high-entropy API key supplied out of band. The key
- * is mapped to the issuer's public key by configuration, so the caller can never
- * choose which issuer they are.
- *
  * Configuration:
- *   ISSUER_KEYS="<apiKey>:<192-hex-pubkey>,<apiKey2>:<pubkey2>"
- *
- * The registry is read per request so keys can be rotated without a restart and
- * so tests can configure it per case.
+ *   ISSUER_KEYS="<apiKey>:<issuerId>,<apiKey2>:<issuerId2>"
+ *   where <issuerId> is either a Stellar StrKey public address (G...) or a
+ *   legacy 192-hex BLS public key.
  */
 
 "use strict";
 
 const crypto = require("crypto");
+const { StrKey } = require("@stellar/stellar-sdk");
 
-const PUBKEY_RE = /^[0-9a-f]{192}$/;
+const HEX_PUBKEY_RE = /^[0-9a-f]{192}$/;
 
-/**
- * Constant-time string comparison that does not leak length.
- * @param {string} a
- * @param {string} b
- * @returns {boolean}
- */
 function timingSafeEqualStrings(a, b) {
   const ha = crypto.createHash("sha256").update(String(a)).digest();
   const hb = crypto.createHash("sha256").update(String(b)).digest();
   return crypto.timingSafeEqual(ha, hb);
 }
 
+function isValidIssuerId(value) {
+  if (typeof value !== "string") return false;
+  return StrKey.isValidEd25519PublicKey(value) || HEX_PUBKEY_RE.test(value.toLowerCase());
+}
+
 /**
- * Parse ISSUER_KEYS into a Map<apiKey, issuerPubkey>.
- * Malformed entries are skipped rather than trusted.
+ * Parse ISSUER_KEYS into a Map<apiKey, issuerId>.
  * @param {string} [raw]
  * @returns {Map<string, string>}
  */
@@ -48,19 +42,16 @@ function parseIssuerKeys(raw) {
     if (separator <= 0) continue;
 
     const apiKey = entry.slice(0, separator).trim();
-    const pubkey = entry.slice(separator + 1).trim().toLowerCase();
-    if (!apiKey || !PUBKEY_RE.test(pubkey)) continue;
+    const rawId = entry.slice(separator + 1).trim();
+    const issuerId = StrKey.isValidEd25519PublicKey(rawId) ? rawId : rawId.toLowerCase();
+    if (!apiKey || !isValidIssuerId(issuerId)) continue;
 
-    registry.set(apiKey, pubkey);
+    registry.set(apiKey, issuerId);
   }
 
   return registry;
 }
 
-/**
- * Express middleware: require a valid issuer API key.
- * On success sets `req.issuer = { pubkey }`.
- */
 function requireIssuer(req, res, next) {
   const provided = req.get("x-issuer-key");
   if (!provided) return res.status(401).json({ error: "Unauthorized" });
@@ -76,4 +67,4 @@ function requireIssuer(req, res, next) {
   return res.status(401).json({ error: "Unauthorized" });
 }
 
-module.exports = { requireIssuer, parseIssuerKeys, timingSafeEqualStrings };
+module.exports = { requireIssuer, parseIssuerKeys, timingSafeEqualStrings, isValidIssuerId };

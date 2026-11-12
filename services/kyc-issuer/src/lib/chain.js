@@ -2,16 +2,8 @@
  * Soroban submission for issuer-attested credentials.
  *
  * Approval writes one `issue_credential(issuer, subject, attribute, expires_at)`
- * invocation per requested attribute to the VC Verifier contract. The issuer
- * address and key come from the server environment; no key material is accepted
- * over HTTP.
- *
- * Configuration (all required to enable on-chain issuance):
- *   SOROBAN_RPC_URL, NETWORK_PASSPHRASE, VC_VERIFIER_CONTRACT_ID, ISSUER_SECRET_KEY
- *
- * `ISSUER_SECRET_KEY` must belong to an address registered on-chain via
- * `VCVerifier.add_issuer`; otherwise every submission fails and the request
- * stays pending.
+ * invocation per requested attribute to the VC Verifier contract, and supports
+ * compensating `revoke_credential` rollback if a multi-attribute batch fails.
  */
 
 "use strict";
@@ -21,6 +13,7 @@ const {
   Contract,
   Keypair,
   SorobanRpc,
+  StrKey,
   TransactionBuilder,
   nativeToScVal,
 } = require("@stellar/stellar-sdk");
@@ -29,20 +22,43 @@ const DEFAULT_TTL_LEDGERS = 518_400; // ~30 days at 5 s/ledger
 const POLL_INTERVAL_MS = 1_000;
 const POLL_TIMEOUT_MS = 45_000;
 
+function parseSecretKeyMap(raw) {
+  const map = new Map();
+  if (!raw) return map;
+  for (const part of String(raw).split(",")) {
+    const entry = part.trim();
+    if (!entry) continue;
+    const idx = entry.indexOf(":");
+    if (idx <= 0) continue;
+    const pub = entry.slice(0, idx).trim();
+    const sec = entry.slice(idx + 1).trim();
+    if (StrKey.isValidEd25519PublicKey(pub) && sec) {
+      map.set(pub, sec);
+    }
+  }
+  return map;
+}
+
 /**
- * Read and validate chain configuration. Returns null when on-chain issuance is
- * not configured (or the secret is malformed), so callers can fail closed.
+ * Read and validate chain configuration. Fails closed when missing or when
+ * `expectedIssuerId` (a Stellar G... address) does not match the signing key.
  *
  * @param {NodeJS.ProcessEnv} [env]
- * @returns {{rpcUrl: string, networkPassphrase: string, contractId: string,
- *            keypair: import("@stellar/stellar-sdk").Keypair, address: string,
- *            ttlLedgers: number} | null}
+ * @param {string} [expectedIssuerId]
  */
-function loadChainConfig(env = process.env) {
+function loadChainConfig(env = process.env, expectedIssuerId = null) {
   const rpcUrl = env.SOROBAN_RPC_URL;
   const networkPassphrase = env.NETWORK_PASSPHRASE;
   const contractId = env.VC_VERIFIER_CONTRACT_ID;
-  const secret = env.ISSUER_SECRET_KEY;
+
+  let secret = env.ISSUER_SECRET_KEY;
+  if (expectedIssuerId && StrKey.isValidEd25519PublicKey(expectedIssuerId) && env.ISSUER_SECRET_KEYS) {
+    const secretMap = parseSecretKeyMap(env.ISSUER_SECRET_KEYS);
+    if (secretMap.has(expectedIssuerId)) {
+      secret = secretMap.get(expectedIssuerId);
+    }
+  }
+
   if (!rpcUrl || !networkPassphrase || !contractId || !secret) return null;
 
   let keypair;
@@ -52,8 +68,18 @@ function loadChainConfig(env = process.env) {
     return null;
   }
 
+  // Prevent silent divergence between authenticated issuer and on-chain signer.
+  if (
+    expectedIssuerId &&
+    StrKey.isValidEd25519PublicKey(expectedIssuerId) &&
+    keypair.publicKey() !== expectedIssuerId
+  ) {
+    throw new Error("Authenticated issuer identity does not match on-chain signing key");
+  }
+
   const ttl = Number.parseInt(env.CREDENTIAL_TTL_LEDGERS || "", 10);
-  const ttlLedgers = Number.isFinite(ttl) && ttl > 0 && ttl <= 6_312_000 ? ttl : DEFAULT_TTL_LEDGERS;
+  const ttlLedgers =
+    Number.isFinite(ttl) && ttl > 0 && ttl <= 6_312_000 ? ttl : DEFAULT_TTL_LEDGERS;
 
   return {
     rpcUrl,
@@ -71,25 +97,12 @@ function serverFor(config) {
   });
 }
 
-/**
- * Ledger sequence at which credentials issued now should expire.
- *
- * @param {object} config
- * @returns {Promise<number>}
- */
 async function credentialExpiryLedger(config, server = serverFor(config)) {
   const latest = await server.getLatestLedger();
   return Number(latest.sequence) + config.ttlLedgers;
 }
 
-/**
- * Submit one `issue_credential` call and wait for a final result.
- *
- * @param {object} config
- * @param {{subject: string, attribute: string, expiresAt: number}} params
- * @returns {Promise<{hash: string, ledger: number}>}
- */
-async function issueCredential(config, { subject, attribute, expiresAt }) {
+async function submitContractCall(config, method, args) {
   const server = serverFor(config);
   const source = await server.getAccount(config.address);
   const contract = new Contract(config.contractId);
@@ -98,15 +111,7 @@ async function issueCredential(config, { subject, attribute, expiresAt }) {
     fee: "1000000",
     networkPassphrase: config.networkPassphrase,
   })
-    .addOperation(
-      contract.call(
-        "issue_credential",
-        new Address(config.address).toScVal(),
-        new Address(subject).toScVal(),
-        nativeToScVal(attribute, { type: "symbol" }),
-        nativeToScVal(expiresAt, { type: "u32" })
-      )
-    )
+    .addOperation(contract.call(method, ...args))
     .setTimeout(60)
     .build();
 
@@ -122,7 +127,7 @@ async function issueCredential(config, { subject, attribute, expiresAt }) {
     throw new Error("Soroban RPC rejected the transaction");
   }
 
-  const result = await pollTransaction(server, sent.hash);
+  const result = await pollTransaction(server, sent.hash, config.rpcUrl);
   if (result.status !== "SUCCESS") {
     throw new Error(`credential transaction ${sent.hash} did not succeed`);
   }
@@ -130,10 +135,49 @@ async function issueCredential(config, { subject, attribute, expiresAt }) {
   return { hash: sent.hash, ledger: Number(result.ledger) };
 }
 
-async function pollTransaction(server, hash) {
+async function issueCredential(config, { subject, attribute, expiresAt }) {
+  return submitContractCall(config, "issue_credential", [
+    new Address(config.address).toScVal(),
+    new Address(subject).toScVal(),
+    nativeToScVal(attribute, { type: "symbol" }),
+    nativeToScVal(expiresAt, { type: "u32" }),
+  ]);
+}
+
+async function revokeCredential(config, { subject, attribute }) {
+  return submitContractCall(config, "revoke_credential", [
+    new Address(config.address).toScVal(),
+    new Address(subject).toScVal(),
+    nativeToScVal(attribute, { type: "symbol" }),
+  ]);
+}
+
+async function getTransactionSafe(server, rpcUrl, hash) {
+  try {
+    return await server.getTransaction(hash);
+  } catch (err) {
+    if (String(err && err.message).includes("Bad union switch") && rpcUrl) {
+      const res = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "getTransaction",
+          params: { hash },
+        }),
+      });
+      const json = await res.json();
+      if (json && json.result) return json.result;
+    }
+    throw err;
+  }
+}
+
+async function pollTransaction(server, hash, rpcUrl) {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const result = await server.getTransaction(hash);
+    const result = await getTransactionSafe(server, rpcUrl, hash);
     if (result.status !== "NOT_FOUND") return result;
     await sleep(POLL_INTERVAL_MS);
   }
@@ -144,4 +188,9 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-module.exports = { loadChainConfig, issueCredential, credentialExpiryLedger };
+module.exports = {
+  loadChainConfig,
+  issueCredential,
+  revokeCredential,
+  credentialExpiryLedger,
+};

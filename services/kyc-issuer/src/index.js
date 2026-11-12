@@ -1,21 +1,5 @@
 /**
  * KYC Issuer Service
- *
- * Off-chain service that:
- *  1. Accepts KYC requests from users (documents, personal info)
- *  2. Reviews and approves/rejects requests (issuer-authenticated)
- *  3. Returns placeholder credentials to users (one-time retrieval by token)
- *
- * Architecture mirrors the 3-party model:
- *   Admin → registers issuers on-chain
- *   Issuer (this service) → verifies off-chain, writes rings on-chain
- *   User → proves attributes via ring signatures
- *
- * Known gaps (see AUDIT.md):
- *  - No on-chain call: the verifier cannot check BLS proofs yet
- *  - In-memory, unencrypted storage; no persistence or retention job
- *  - No SEP-10 JWT authentication (API keys are used instead)
- *  - Optional document verification / sanctions screening not integrated
  */
 
 "use strict";
@@ -24,15 +8,24 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 
+const authRouter = require("./routes/auth");
 const kycRouter = require("./routes/kyc");
 const issuerRouter = require("./routes/issuer");
+const store = require("./store");
 const { rateLimit } = require("./lib/rateLimit");
 
 const app = express();
+app.disable("x-powered-by");
 
-// ── CORS ──────────────────────────────────────────────────────────────────────
-// Only origins listed in CORS_ORIGIN may call this service from a browser.
-// With no configuration, no cross-origin access is granted.
+// Security headers for sensitive identity APIs
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Cache-Control", "no-store");
+  next();
+});
+
 const allowedOrigins = (process.env.CORS_ORIGIN || "")
   .split(",")
   .map((s) => s.trim())
@@ -44,27 +37,33 @@ app.use(
   })
 );
 
-// Large KYC payloads must not be accepted from unauthenticated callers at the
-// default 100kb limit; keep an explicit, bounded limit.
 app.use(express.json({ limit: process.env.MAX_BODY_SIZE || "6mb" }));
 
-// ── Rate limiting ─────────────────────────────────────────────────────────────
-// The submission endpoint is unauthenticated by design (public intake), so it is
-// the most attractive DoS target.
-const submissionLimiter = rateLimit({
+const authLimiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000),
   max: Number(process.env.RATE_LIMIT_MAX || 30),
 });
+const kycLimiter = rateLimit({
+  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000),
+  max: Number(process.env.RATE_LIMIT_MAX || 30),
+});
+const issuerLimiter = rateLimit({
+  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000),
+  max: Number(process.env.RATE_LIMIT_MAX || 60),
+});
 
-// ── Routes ────────────────────────────────────────────────────────────────────
-app.use("/api/kyc/request", submissionLimiter);
-app.use("/api/kyc", kycRouter);
-app.use("/api/issuer", issuerRouter);
+app.locals.resetRateLimiters = () => {
+  authLimiter.reset();
+  kycLimiter.reset();
+  issuerLimiter.reset();
+};
+
+app.use("/api/auth", authLimiter, authRouter);
+app.use("/api/kyc", kycLimiter, kycRouter);
+app.use("/api/issuer", issuerLimiter, issuerRouter);
 
 app.get("/health", (_req, res) => res.json({ status: "ok", ts: Date.now() }));
 
-// ── Error handling ────────────────────────────────────────────────────────────
-// Malformed JSON and unexpected errors must not leak stack traces or internals.
 app.use((err, _req, res, _next) => {
   if (err && err.type === "entity.too.large") {
     return res.status(413).json({ error: "Payload too large" });
@@ -76,10 +75,12 @@ app.use((err, _req, res, _next) => {
   return res.status(500).json({ error: "Internal error" });
 });
 
-// ── Start ─────────────────────────────────────────────────────────────────────
 if (require.main === module) {
+  const sweepTimer = setInterval(() => store.purgeExpired(), 60_000);
+  if (typeof sweepTimer.unref === "function") sweepTimer.unref();
+
   const PORT = process.env.PORT || 3001;
   app.listen(PORT, () => console.log(`KYC Issuer running on :${PORT}`));
 }
 
-module.exports = app; // for tests
+module.exports = app;

@@ -1,7 +1,7 @@
 {
   "name": "@stellar-did/kyc-issuer",
   "version": "0.1.0",
-  "description": "Off-chain KYC issuer service — verifies identities and issues BLS ring credentials",
+  "description": "Off-chain KYC issuer service — SEP-10 authenticated intake, encrypted PII store, and Soroban credential issuance",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
