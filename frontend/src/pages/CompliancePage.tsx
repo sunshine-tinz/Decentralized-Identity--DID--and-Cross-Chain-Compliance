@@ -1,10 +1,10 @@
 import { useState, FormEvent } from "react";
-import { ComplianceClient } from "@stellar-did/sdk";
+import { ComplianceClient, submitSignedTransaction } from "@stellar-did/sdk";
 import { useWallet } from "../context/WalletContext";
 import { getConfig } from "../config";
 
 export default function CompliancePage() {
-  const { address } = useWallet();
+  const { address, isConnected, signTransaction } = useWallet();
   const [subjectAddress, setSubjectAddress] = useState<string>(address || "");
   const [policyName, setPolicyName] = useState<string>("defi_pool");
   const [isCompliant, setIsCompliant] = useState<boolean | null>(null);
@@ -67,17 +67,33 @@ export default function CompliancePage() {
 
   async function handleExport() {
     const target = subjectAddress.trim() || address;
-    if (!target) return;
+    if (!target) {
+      setError("Please provide a subject address to export");
+      return;
+    }
 
     setLoading(true);
     setError("");
     setStatus("Generating compliance attestation snapshot...");
     try {
-      const client = new ComplianceClient(config);
+      const client = new ComplianceClient({ ...config, publicKey: address || undefined });
 
       const attestation = await client.exportAttestation(target, policyName);
       setExportedAttestation(attestation);
-      setStatus("Point-in-time attestation snapshot exported and event published!");
+
+      if (isConnected && address) {
+        setStatus("Preparing export_attestation transaction for on-chain event emission...");
+        const xdr = await client.buildExportAttestationTx(target, policyName);
+        const signed = await signTransaction(xdr);
+        const receipt = await submitSignedTransaction(config, signed);
+        setStatus(
+          `Attestation committed on-chain on ledger ${receipt.ledger} (tx: ${receipt.hash})!`
+        );
+      } else {
+        setStatus(
+          "Simulated attestation preview generated (connect Freighter wallet to commit event on-chain)."
+        );
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(`Attestation export error: ${msg}`);

@@ -1,4 +1,5 @@
-import { useState, FormEvent } from "react";
+import { useState, useEffect, FormEvent } from "react";
+import { StrKey } from "@stellar/stellar-sdk";
 import { useWallet } from "../context/WalletContext";
 import { getConfig } from "../config";
 
@@ -10,15 +11,15 @@ const AVAILABLE_ATTRIBUTES = [
 ];
 
 export default function VerifyPage() {
-  const { address } = useWallet();
+  const { address, isConnected, signTransaction } = useWallet();
   const [selectedAttrs, setSelectedAttrs] = useState<string[]>(["kyc_passed"]);
+  const [subject, setSubject] = useState<string>(address || "");
   const [userId, setUserId] = useState<string>("");
   const [firstName, setFirstName] = useState<string>("Alice");
   const [lastName, setLastName] = useState<string>("Smith");
   const [dob, setDob] = useState<string>("1990-01-01");
-  const [issuerPubkey, setIssuerPubkey] = useState<string>(
-    "a".repeat(192) // default 192 hex chars for mock/test issuer
-  );
+  const [issuerPubkey, setIssuerPubkey] = useState<string>("a".repeat(192));
+  const [authToken, setAuthToken] = useState<string>("");
 
   const [requestId, setRequestId] = useState<string>("");
   const [retrievalToken, setRetrievalToken] = useState<string>("");
@@ -30,30 +31,77 @@ export default function VerifyPage() {
 
   const config = getConfig();
 
+  useEffect(() => {
+    if (address && !subject) {
+      setSubject(address);
+    }
+  }, [address, subject]);
+
   function toggleAttr(attr: string) {
     setSelectedAttrs((prev) =>
       prev.includes(attr) ? prev.filter((a) => a !== attr) : [...prev, attr]
     );
   }
 
+  async function authenticateSubject(subjectAddr: string): Promise<string> {
+    if (authToken) return authToken;
+    const challengeRes = await fetch(
+      `${config.kycIssuerUrl}/api/auth/challenge?account=${encodeURIComponent(subjectAddr)}`
+    );
+    if (!challengeRes.ok) {
+      const data = await challengeRes.json().catch(() => ({}));
+      throw new Error(data.error || "Failed to request SEP-10 authentication challenge");
+    }
+    const { transaction } = await challengeRes.json();
+    const signedChallenge = await signTransaction(transaction);
+
+    const tokenRes = await fetch(`${config.kycIssuerUrl}/api/auth/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transaction: signedChallenge }),
+    });
+    const tokenData = await tokenRes.json().catch(() => ({}));
+    if (!tokenRes.ok || !tokenData.token) {
+      throw new Error(tokenData.error || "SEP-10 authentication failed");
+    }
+    setAuthToken(tokenData.token);
+    return tokenData.token;
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError("");
     setMessage("");
-    setLoading(true);
 
-    const uid = userId.trim() || (address ? address.slice(0, 16) : "user_" + Date.now());
+    const trimmedSubject = subject.trim();
+    if (!trimmedSubject || !StrKey.isValidEd25519PublicKey(trimmedSubject)) {
+      setError("A valid Stellar subject address (G...) is required.");
+      return;
+    }
+
+    setLoading(true);
+    const uid = userId.trim() || trimmedSubject.slice(0, 16);
 
     try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (authToken) {
+        headers.Authorization = `Bearer ${authToken}`;
+      } else if (isConnected && address === trimmedSubject) {
+        const token = await authenticateSubject(trimmedSubject);
+        headers.Authorization = `Bearer ${token}`;
+      }
+
       const res = await fetch(`${config.kycIssuerUrl}/api/kyc/request`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           userId: uid,
+          subject: trimmedSubject,
           attributes: selectedAttrs,
           personalInfo: { firstName, lastName, dob },
-          issuerPubkey,
-          documentPhoto: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+          issuerPubkey: issuerPubkey.trim(),
+          documentPhoto:
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
         }),
       });
 
@@ -64,8 +112,10 @@ export default function VerifyPage() {
 
       setRequestId(data.requestId);
       setRetrievalToken(data.retrievalToken);
-      setKycStatus(data.status);
-      setMessage(`KYC request submitted successfully! Request ID: ${data.requestId}. One-time retrieval token issued.`);
+      setKycStatus(data.status || "pending");
+      setMessage(
+        `KYC request submitted successfully! Request ID: ${data.requestId}. One-time retrieval token issued.`
+      );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(`Error submitting request: ${msg}`);
@@ -79,7 +129,11 @@ export default function VerifyPage() {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`${config.kycIssuerUrl}/api/kyc/status/${requestId}`);
+      const headers: Record<string, string> = {};
+      if (authToken) headers.Authorization = `Bearer ${authToken}`;
+      const res = await fetch(`${config.kycIssuerUrl}/api/kyc/status/${requestId}`, {
+        headers,
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Status check failed");
       setKycStatus(data.status);
@@ -97,12 +151,15 @@ export default function VerifyPage() {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`${config.kycIssuerUrl}/api/kyc/credential/${retrievalToken}`);
+      const headers: Record<string, string> = {};
+      if (authToken) headers.Authorization = `Bearer ${authToken}`;
+      const res = await fetch(`${config.kycIssuerUrl}/api/kyc/credential/${retrievalToken}`, {
+        headers,
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Credential retrieval failed");
       setRetrievedCred(data);
       setMessage("Credential retrieved successfully via single-use token!");
-      localStorage.setItem(`credential_${requestId}`, JSON.stringify(data));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(`Credential retrieval error: ${msg}`);
@@ -116,7 +173,7 @@ export default function VerifyPage() {
       <h2 id="verify-heading">Request KYC Verification</h2>
       <p>Submit identity information to an authenticated KYC issuer off-chain.</p>
 
-      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+      <form onSubmit={handleSubmit} noValidate style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
         <fieldset style={{ border: "1px solid #ccc", padding: "1rem", borderRadius: "4px" }}>
           <legend><strong>Required Compliance Attributes</strong></legend>
           {AVAILABLE_ATTRIBUTES.map((attr) => (
@@ -132,12 +189,24 @@ export default function VerifyPage() {
         </fieldset>
 
         <label>
-          <strong>User ID / Subject Reference:</strong>
+          <strong>Subject Stellar Address (G...):</strong>
+          <input
+            type="text"
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            placeholder={address ? address : "G..."}
+            required
+            style={{ width: "100%", padding: "0.5rem", fontFamily: "monospace" }}
+          />
+        </label>
+
+        <label>
+          <strong>User ID / Reference (optional):</strong>
           <input
             type="text"
             value={userId}
             onChange={(e) => setUserId(e.target.value)}
-            placeholder={address ? address : "user_12345"}
+            placeholder="user_12345"
             style={{ width: "100%", padding: "0.5rem" }}
           />
         </label>
@@ -177,7 +246,7 @@ export default function VerifyPage() {
         </label>
 
         <label>
-          Target Issuer BLS Public Key (192 hex chars):
+          Target Issuer Identifier (192-hex key or Stellar G... address):
           <input
             type="text"
             value={issuerPubkey}

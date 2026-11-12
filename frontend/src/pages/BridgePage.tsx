@@ -6,6 +6,8 @@ export default function BridgePage() {
   const [receiverAddress, setReceiverAddress] = useState<string>("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
   const [policy, setPolicy] = useState<string>("defi_pool");
   const [compliant, setCompliant] = useState<boolean>(true);
+  const [stellarLedger, setStellarLedger] = useState<number>(100);
+  const [expiresAt, setExpiresAt] = useState<number>(2_000_000_000);
   const [eventId, setEventId] = useState<string>("0000000100-0000000001");
   const [chainId, setChainId] = useState<number>(11155111); // Sepolia
   const [digest, setDigest] = useState<string>("");
@@ -25,14 +27,35 @@ export default function BridgePage() {
       }
 
       const calculatedNonce = ethers.keccak256(ethers.toUtf8Bytes(String(eventId)));
-      const calculatedDigest = ethers.solidityPackedKeccak256(
-        ["address", "string", "bool", "bytes32", "uint256", "address"],
-        [subject, policy, compliant, calculatedNonce, chainId, receiverAddress]
-      );
+      const domain = {
+        name: "StellarComplianceBridge",
+        version: "1",
+        chainId: BigInt(chainId),
+        verifyingContract: ethers.getAddress(receiverAddress),
+      };
+      const types = {
+        Attestation: [
+          { name: "subject", type: "address" },
+          { name: "policy", type: "string" },
+          { name: "compliant", type: "bool" },
+          { name: "stellarLedger", type: "uint64" },
+          { name: "expiresAt", type: "uint64" },
+          { name: "nonce", type: "bytes32" },
+        ],
+      };
+      const value = {
+        subject: ethers.getAddress(subject),
+        policy,
+        compliant,
+        stellarLedger: BigInt(stellarLedger),
+        expiresAt: BigInt(expiresAt),
+        nonce: calculatedNonce,
+      };
+      const calculatedDigest = ethers.TypedDataEncoder.hash(domain, types, value);
 
       setNonce(calculatedNonce);
       setDigest(calculatedDigest);
-      setStatus("EIP-191 payload successfully computed and bound to chainId, receiver, and nonce!");
+      setStatus("EIP-712 typed-data digest computed and bound to chainId, verifyingContract, ledger, expiry, and nonce!");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(`Computation error: ${msg}`);
@@ -42,14 +65,15 @@ export default function BridgePage() {
   return (
     <section aria-labelledby="bridge-heading" style={{ maxWidth: "680px", margin: "0 auto", padding: "1.5rem" }}>
       <h2 id="bridge-heading">Stellar → EVM Cross-Chain Bridge</h2>
-      <p>Decodes verified Soroban compliance events, signs EIP-191 attestations, and relays to EVM AttestationReceiver.</p>
+      <p>Decodes verified Soroban compliance events, maps authenticated identities, signs EIP-712 attestations, and relays to EVM AttestationReceiver.</p>
 
       <div style={{ background: "#f5f5f5", padding: "1rem", borderRadius: "8px", marginBottom: "1.5rem" }}>
         <h3>Bridge Architecture</h3>
         <p>1. ComplianceEngine emits <code>compliance::attestation</code> event on Stellar.</p>
-        <p>2. StellarListener decodes and validates event id, topics, subject, and compliance flag.</p>
-        <p>3. EVMRelayer signs EIP-191 digest: <code>keccak256(abi.encodePacked(subject, policy, compliant, nonce, chainId))</code>.</p>
-        <p>4. EVM <code>AttestationReceiver.sol</code> verifies relayer signature and enforces single-use nonce.</p>
+        <p>2. StellarListener durably queues the event before advancing its cursor.</p>
+        <p>3. IdentityRegistry resolves authenticated dual-signed Stellar (G...) → EVM (0x...) mapping.</p>
+        <p>4. EVMRelayer signs EIP-712 <code>Attestation</code> bound to <code>chainId</code>, <code>verifyingContract</code>, <code>stellarLedger</code>, <code>expiresAt</code>, and <code>nonce</code>.</p>
+        <p>5. EVM <code>AttestationReceiver.sol</code> verifies low-s ECDSA signature, monotonic ledger ordering, expiry, and single-use nonce.</p>
       </div>
 
       <form onSubmit={handleCalculateDigest} style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
@@ -98,6 +122,29 @@ export default function BridgePage() {
           </select>
         </label>
 
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+          <label>
+            <strong>Stellar Ledger:</strong>
+            <input
+              type="number"
+              value={stellarLedger}
+              onChange={(e) => setStellarLedger(Number(e.target.value))}
+              required
+              style={{ width: "100%", padding: "0.5rem" }}
+            />
+          </label>
+          <label>
+            <strong>Expires At (Unix Timestamp):</strong>
+            <input
+              type="number"
+              value={expiresAt}
+              onChange={(e) => setExpiresAt(Number(e.target.value))}
+              required
+              style={{ width: "100%", padding: "0.5rem" }}
+            />
+          </label>
+        </div>
+
         <label>
           <strong>Stellar Event ID (Nonce Seed):</strong>
           <input
@@ -124,7 +171,7 @@ export default function BridgePage() {
           type="submit"
           style={{ padding: "0.75rem", background: "#1976d2", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}
         >
-          Compute EIP-191 Attestation Digest
+          Compute EIP-712 Attestation Digest
         </button>
       </form>
 
@@ -146,7 +193,7 @@ export default function BridgePage() {
           <p><strong>Derived Nonce (bytes32):</strong></p>
           <code style={{ wordBreak: "break-all" }}>{nonce}</code>
 
-          <p style={{ marginTop: "0.5rem" }}><strong>EIP-191 Digest (bytes32):</strong></p>
+          <p style={{ marginTop: "0.5rem" }}><strong>EIP-712 Digest (bytes32):</strong></p>
           <code style={{ wordBreak: "break-all" }}>{digest}</code>
         </div>
       )}

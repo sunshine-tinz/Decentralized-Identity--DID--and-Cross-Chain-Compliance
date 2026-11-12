@@ -11,7 +11,7 @@ interface KYCRequest {
 }
 
 export default function IssuerPage() {
-  const [apiKey, setApiKey] = useState<string>("dev-issuer-key");
+  const [apiKey, setApiKey] = useState<string>("");
   const [requests, setRequests] = useState<KYCRequest[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [status, setStatus] = useState<string>("");

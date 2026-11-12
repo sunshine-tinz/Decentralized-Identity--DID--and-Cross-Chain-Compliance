@@ -1,13 +1,25 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
+import {
+  isConnected as freighterIsConnected,
+  requestAccess as freighterRequestAccess,
+  getPublicKey as freighterGetPublicKey,
+  getNetworkDetails as freighterGetNetworkDetails,
+  signTransaction as freighterSignTransaction,
+} from "@stellar/freighter-api";
+import { StrKey } from "@stellar/stellar-sdk";
+import { getConfig } from "../config";
 
 export interface WalletContextType {
   address: string;
   isConnected: boolean;
   isFreighter: boolean;
-  connectWallet: (customAddress?: string) => Promise<string>;
+  connecting: boolean;
+  walletError: string;
+  connectWallet: () => Promise<string>;
   disconnectWallet: () => void;
   signTransaction: (xdr: string) => Promise<string>;
   network: string;
+  networkPassphrase: string;
 }
 
 const WalletContext = createContext<WalletContextType | undefined>(undefined);
@@ -15,72 +27,120 @@ const WalletContext = createContext<WalletContextType | undefined>(undefined);
 const STORAGE_KEY = "stellar_did_wallet_address";
 
 export function WalletProvider({ children }: { children: React.ReactNode }) {
-  const [address, setAddress] = useState<string>(() => {
-    return localStorage.getItem(STORAGE_KEY) || "";
-  });
+  const config = getConfig();
+  const [address, setAddress] = useState<string>("");
   const [isFreighter, setIsFreighter] = useState<boolean>(false);
-  const network = "Stellar Testnet";
+  const [connecting, setConnecting] = useState<boolean>(false);
+  const [walletError, setWalletError] = useState<string>("");
+  const [network, setNetwork] = useState<string>("Stellar Testnet");
 
   useEffect(() => {
-    if (typeof window !== "undefined" && (window as unknown as { freighterApi?: unknown }).freighterApi) {
-      setIsFreighter(true);
-    }
-  }, []);
-
-  const connectWallet = async (customAddress?: string): Promise<string> => {
-    if (customAddress && customAddress.startsWith("G") && customAddress.length === 56) {
-      setAddress(customAddress);
-      localStorage.setItem(STORAGE_KEY, customAddress);
-      return customAddress;
-    }
-
-    const freighter = (window as unknown as {
-      freighterApi?: {
-        getPublicKey: () => Promise<string>;
-        isConnected: () => Promise<boolean>;
-      };
-    }).freighterApi;
-
-    if (freighter) {
+    let active = true;
+    async function detectFreighter() {
       try {
-        const pubKey = await freighter.getPublicKey();
-        if (pubKey) {
-          setAddress(pubKey);
-          localStorage.setItem(STORAGE_KEY, pubKey);
-          return pubKey;
+        const installed = await freighterIsConnected();
+        if (!active) return;
+        setIsFreighter(Boolean(installed));
+        if (installed) {
+          const saved = localStorage.getItem(STORAGE_KEY);
+          if (saved && StrKey.isValidEd25519PublicKey(saved)) {
+            const pk = await freighterGetPublicKey();
+            if (active && pk && pk === saved) {
+              setAddress(pk);
+            }
+          }
+        } else {
+          localStorage.removeItem(STORAGE_KEY);
         }
-      } catch (err) {
-        console.warn("Freighter connection cancelled or failed:", err);
+      } catch {
+        if (active) setIsFreighter(false);
       }
     }
+    detectFreighter();
+    return () => {
+      active = false;
+    };
+  }, []);
 
-    // Default testnet address if no Freighter or cancelled
-    const fallback = customAddress || "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
-    setAddress(fallback);
-    localStorage.setItem(STORAGE_KEY, fallback);
-    return fallback;
+  const connectWallet = async (): Promise<string> => {
+    setConnecting(true);
+    setWalletError("");
+    try {
+      const installed = await freighterIsConnected();
+      setIsFreighter(Boolean(installed));
+      if (!installed) {
+        const msg =
+          "Freighter wallet extension is not installed or unavailable. Please install Freighter to connect.";
+        setWalletError(msg);
+        throw new Error(msg);
+      }
+
+      const pubKey = (await freighterRequestAccess()) || (await freighterGetPublicKey());
+      if (!pubKey || !StrKey.isValidEd25519PublicKey(pubKey)) {
+        const msg = "Wallet connection rejected or returned an invalid Stellar address.";
+        setWalletError(msg);
+        throw new Error(msg);
+      }
+
+      try {
+        const details = await freighterGetNetworkDetails();
+        if (details?.network) {
+          setNetwork(details.network);
+        }
+        if (
+          details?.networkPassphrase &&
+          details.networkPassphrase !== config.networkPassphrase
+        ) {
+          const msg = `Freighter is on "${details.networkPassphrase}", expected "${config.networkPassphrase}".`;
+          setWalletError(msg);
+          throw new Error(msg);
+        }
+      } catch (netErr) {
+        if (netErr instanceof Error && netErr.message.startsWith("Freighter is on")) {
+          throw netErr;
+        }
+      }
+
+      setAddress(pubKey);
+      localStorage.setItem(STORAGE_KEY, pubKey);
+      return pubKey;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setWalletError(msg);
+      throw err instanceof Error ? err : new Error(msg);
+    } finally {
+      setConnecting(false);
+    }
   };
 
   const disconnectWallet = () => {
     setAddress("");
+    setWalletError("");
     localStorage.removeItem(STORAGE_KEY);
   };
 
   const signTransaction = async (xdr: string): Promise<string> => {
-    const freighter = (window as unknown as {
-      freighterApi?: {
-        signTransaction: (xdr: string, options?: { networkPassphrase?: string }) => Promise<string>;
-      };
-    }).freighterApi;
-
-    if (freighter) {
-      return freighter.signTransaction(xdr, {
-        networkPassphrase: "Test SDF Network ; September 2015",
-      });
+    if (!xdr || typeof xdr !== "string") {
+      throw new Error("Prepared transaction XDR is required for signing");
     }
 
-    // In simulated/fallback mode, return simulated signed XDR
-    return xdr;
+    const installed = await freighterIsConnected();
+    if (!installed) {
+      throw new Error("Freighter wallet extension is not installed or unavailable.");
+    }
+    if (!address) {
+      throw new Error("Connect your Freighter wallet before signing transactions.");
+    }
+
+    const signed = await freighterSignTransaction(xdr, {
+      networkPassphrase: config.networkPassphrase,
+      accountToSign: address,
+    });
+
+    if (!signed || typeof signed !== "string") {
+      throw new Error("Transaction signing was rejected or returned empty XDR.");
+    }
+    return signed;
   };
 
   return (
@@ -89,10 +149,13 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         address,
         isConnected: Boolean(address),
         isFreighter,
+        connecting,
+        walletError,
         connectWallet,
         disconnectWallet,
         signTransaction,
         network,
+        networkPassphrase: config.networkPassphrase,
       }}
     >
       {children}

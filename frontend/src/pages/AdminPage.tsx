@@ -1,5 +1,6 @@
 import { useState, useEffect, FormEvent } from "react";
-import { VCClient, ComplianceClient } from "@stellar-did/sdk";
+import { VCClient, ComplianceClient, submitSignedTransaction } from "@stellar-did/sdk";
+import { StrKey } from "@stellar/stellar-sdk";
 import { useWallet } from "../context/WalletContext";
 import { getConfig, saveConfig } from "../config";
 
@@ -17,6 +18,7 @@ export default function AdminPage() {
   const [status, setStatus] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [preparedXdr, setPreparedXdr] = useState<string>("");
+  const [lastTxHash, setLastTxHash] = useState<string>("");
 
   const config = getConfig();
 
@@ -30,7 +32,7 @@ export default function AdminPage() {
       const verifier = await compClient.getVerifier();
       if (verifier) setConfiguredVerifier(verifier);
     } catch {
-      // Contract might be fresh or uninitialized in simulation
+      // Contract might be fresh or uninitialized
     }
   };
 
@@ -38,134 +40,103 @@ export default function AdminPage() {
     loadData();
   }, []);
 
-  async function handleAddIssuer(e: FormEvent) {
-    e.preventDefault();
+  async function submitAdminTx(label: string, buildXdr: () => Promise<string>, afterConfirm?: () => Promise<void>) {
     if (!address) {
-      setError("Connect admin wallet first");
-      return;
-    }
-    if (!newIssuer || !newIssuer.startsWith("G") || newIssuer.length !== 56) {
-      setError("Issuer address must be a valid 56-char Stellar address (G...)");
+      setError("Connect admin Freighter wallet first");
       return;
     }
 
     setLoading(true);
-    setStatus("Preparing add_issuer transaction...");
     setError("");
     setPreparedXdr("");
+    setLastTxHash("");
+    setStatus(`Preparing ${label} transaction...`);
 
     try {
-      const vcClient = new VCClient({
-        ...config,
-        publicKey: address,
-      });
-
-      const xdr = await vcClient.addIssuer(address, newIssuer);
+      const xdr = await buildXdr();
       setPreparedXdr(xdr);
-      setStatus("Signing with wallet...");
-      await signTransaction(xdr);
-      setStatus(`Issuer ${newIssuer} added to registry!`);
-      setIssuers((prev) => [...new Set([...prev, newIssuer])]);
-      setNewIssuer("");
+
+      setStatus(`Waiting for Freighter signature for ${label}...`);
+      const signedXdr = await signTransaction(xdr);
+
+      setStatus(`Submitting ${label} to Stellar RPC and awaiting confirmation...`);
+      const receipt = await submitSignedTransaction(config, signedXdr);
+      setLastTxHash(receipt.hash);
+
+      if (afterConfirm) {
+        await afterConfirm();
+      }
+      await loadData();
+
+      setStatus(`${label} confirmed on ledger ${receipt.ledger} (tx: ${receipt.hash}).`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      setError(`Add issuer error: ${msg}`);
+      setError(`${label} failed: ${msg}`);
+      setStatus("");
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleAddIssuer(e: FormEvent) {
+    e.preventDefault();
+    if (!StrKey.isValidEd25519PublicKey(newIssuer.trim())) {
+      setError("Issuer address must be a valid Stellar public key (G...)");
+      return;
+    }
+    const target = newIssuer.trim();
+    await submitAdminTx(
+      "add_issuer",
+      () => new VCClient({ ...config, publicKey: address }).addIssuer(address, target),
+      async () => setNewIssuer("")
+    );
   }
 
   async function handleRemoveIssuer(e: FormEvent) {
     e.preventDefault();
-    if (!address) {
-      setError("Connect admin wallet first");
+    if (!StrKey.isValidEd25519PublicKey(removeIssuerAddress.trim())) {
+      setError("Issuer address must be a valid Stellar public key (G...)");
       return;
     }
-    setLoading(true);
-    setStatus("Preparing remove_issuer transaction...");
-    setError("");
-    setPreparedXdr("");
-
-    try {
-      const vcClient = new VCClient({
-        ...config,
-        publicKey: address,
-      });
-
-      const xdr = await vcClient.removeIssuer(address, removeIssuerAddress);
-      setPreparedXdr(xdr);
-      await signTransaction(xdr);
-      setStatus(`Issuer ${removeIssuerAddress} removed from registry! All its credentials are now invalidated.`);
-      setIssuers((prev) => prev.filter((i) => i !== removeIssuerAddress));
-      setRemoveIssuerAddress("");
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setError(`Remove issuer error: ${msg}`);
-    } finally {
-      setLoading(false);
-    }
+    const target = removeIssuerAddress.trim();
+    await submitAdminTx(
+      "remove_issuer",
+      () => new VCClient({ ...config, publicKey: address }).removeIssuer(address, target),
+      async () => setRemoveIssuerAddress("")
+    );
   }
 
   async function handleSetPolicy(e: FormEvent) {
     e.preventDefault();
-    if (!address) {
-      setError("Connect admin wallet first");
-      return;
-    }
     const attrs = policyAttrs
       .split(",")
       .map((a) => a.trim())
       .filter(Boolean);
-
-    setLoading(true);
-    setStatus(`Preparing policy ${policyName} update...`);
-    setError("");
-    try {
-      const compClient = new ComplianceClient({
-        ...config,
-        publicKey: address,
-      });
-
-      const xdr = await compClient.setPolicy(address, policyName, attrs);
-      setPreparedXdr(xdr);
-      await signTransaction(xdr);
-      setStatus(`Policy ${policyName} configured on ComplianceEngine!`);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setError(`Set policy error: ${msg}`);
-    } finally {
-      setLoading(false);
+    if (attrs.length === 0) {
+      setError("At least one attribute is required");
+      return;
     }
+
+    await submitAdminTx("set_policy", () =>
+      new ComplianceClient({ ...config, publicKey: address }).setPolicy(address, policyName.trim(), attrs)
+    );
   }
 
   async function handleSetVerifier(e: FormEvent) {
     e.preventDefault();
-    if (!address) {
-      setError("Connect admin wallet first");
+    if (!StrKey.isValidContract(newVerifier.trim())) {
+      setError("Verifier address must be a valid Stellar contract address (C...)");
       return;
     }
-    setLoading(true);
-    setStatus("Preparing set_verifier transaction...");
-    setError("");
-    try {
-      const compClient = new ComplianceClient({
-        ...config,
-        publicKey: address,
-      });
-
-      const xdr = await compClient.setVerifier(address, newVerifier);
-      setPreparedXdr(xdr);
-      await signTransaction(xdr);
-      setConfiguredVerifier(newVerifier);
-      saveConfig({ vcVerifierId: newVerifier });
-      setStatus(`Verifier contract address set to ${newVerifier}`);
-      setNewVerifier("");
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setError(`Set verifier error: ${msg}`);
-    } finally {
-      setLoading(false);
-    }
+    const target = newVerifier.trim();
+    await submitAdminTx(
+      "set_verifier",
+      () => new ComplianceClient({ ...config, publicKey: address }).setVerifier(address, target),
+      async () => {
+        saveConfig({ vcVerifierId: target });
+        setNewVerifier("");
+      }
+    );
   }
 
   return (
@@ -178,13 +149,19 @@ export default function AdminPage() {
         {isConnected ? (
           <p><strong>Admin Address:</strong> <code>{address}</code></p>
         ) : (
-          <p style={{ color: "#d32f2f" }}>Please connect your admin wallet from the Register page first.</p>
+          <p style={{ color: "#d32f2f" }}>Please connect your admin Freighter wallet from the Register page first.</p>
         )}
       </div>
 
       {status && (
         <div role="status" style={{ margin: "1rem 0", padding: "0.75rem", background: "#e8f5e9", color: "#2e7d32", borderRadius: "4px" }}>
           {status}
+        </div>
+      )}
+
+      {lastTxHash && (
+        <div style={{ margin: "0.5rem 0", padding: "0.5rem 0.75rem", background: "#e3f2fd", borderRadius: "4px", fontSize: "13px" }}>
+          <strong>Confirmed Tx:</strong> <code>{lastTxHash}</code>
         </div>
       )}
 
@@ -214,7 +191,7 @@ export default function AdminPage() {
               disabled={loading || !isConnected}
               style={{ width: "100%", padding: "0.5rem", background: "#1976d2", color: "white", border: "none", borderRadius: "4px" }}
             >
-              Add Issuer
+              {loading ? "Processing..." : "Add Issuer"}
             </button>
           </form>
         </div>
@@ -238,7 +215,7 @@ export default function AdminPage() {
               disabled={loading || !isConnected}
               style={{ width: "100%", padding: "0.5rem", background: "#d32f2f", color: "white", border: "none", borderRadius: "4px" }}
             >
-              Remove Issuer (Invalidates Credentials)
+              {loading ? "Processing..." : "Remove Issuer (Invalidates Credentials)"}
             </button>
           </form>
         </div>
@@ -285,7 +262,7 @@ export default function AdminPage() {
             disabled={loading || !isConnected}
             style={{ padding: "0.5rem", background: "#388e3c", color: "white", border: "none", borderRadius: "4px" }}
           >
-            Configure Policy
+            {loading ? "Processing..." : "Configure Policy"}
           </button>
         </form>
       </div>

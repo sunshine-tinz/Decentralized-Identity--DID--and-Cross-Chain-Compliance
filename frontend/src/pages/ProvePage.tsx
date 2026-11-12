@@ -1,5 +1,6 @@
 import { useState, FormEvent } from "react";
 import { VCClient } from "@stellar-did/sdk";
+import { StrKey } from "@stellar/stellar-sdk";
 import { useWallet } from "../context/WalletContext";
 import { getConfig } from "../config";
 
@@ -24,9 +25,9 @@ export default function ProvePage() {
 
   async function handleVerify(e: FormEvent) {
     e.preventDefault();
-    const target = subjectAddress.trim() || address;
-    if (!target) {
-      setError("Please provide a subject address to verify");
+    const target = (subjectAddress.trim() || address).trim();
+    if (!target || !StrKey.isValidEd25519PublicKey(target)) {
+      setError("Please provide a valid Stellar subject address (G...) to verify");
       return;
     }
 
