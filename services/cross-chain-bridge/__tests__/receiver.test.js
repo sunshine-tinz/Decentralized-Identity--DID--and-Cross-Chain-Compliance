@@ -1,18 +1,31 @@
 "use strict";
 
+/**
+ * JavaScript EIP-712 helper and ABI compatibility tests for AttestationReceiver.
+ *
+ * NOTE: These tests verify JavaScript signing/ABI alignment only. Actual Solidity
+ * bytecode execution, signature recovery, replay rejection, and expiration are
+ * tested in Foundry (`contracts/evm/test/AttestationReceiver.t.sol`).
+ */
+
 const fs = require("fs");
 const path = require("path");
 const solc = require("solc");
 const { ethers } = require("ethers");
-const { EVMRelayer, RECEIVER_ABI } = require("../src/lib/evmRelayer");
+const {
+  RECEIVER_ABI,
+  EIP712_DOMAIN_NAME,
+  EIP712_DOMAIN_VERSION,
+  ATTESTATION_TYPES,
+} = require("../src/lib/evmRelayer");
 
-describe("AttestationReceiver Contract and Verification", () => {
+describe("AttestationReceiver ABI and EIP-712 Helper Alignment", () => {
   let artifact;
   let relayerWallet;
   let unauthorizedWallet;
   let destinationContractAddress;
   let otherContractAddress;
-  const chainId = 11155111;
+  const chainId = 11155111n;
 
   beforeAll(() => {
     const solPath = path.resolve(__dirname, "../../../contracts/evm/AttestationReceiver.sol");
@@ -33,7 +46,9 @@ describe("AttestationReceiver Contract and Verification", () => {
     };
 
     const output = JSON.parse(solc.compile(JSON.stringify(input)));
-    expect(output.errors ? output.errors.filter((e) => e.severity === "error") : []).toHaveLength(0);
+    expect(output.errors ? output.errors.filter((e) => e.severity === "error") : []).toHaveLength(
+      0
+    );
 
     const contract = output.contracts["AttestationReceiver.sol"]["AttestationReceiver"];
     artifact = {
@@ -47,184 +62,93 @@ describe("AttestationReceiver Contract and Verification", () => {
     otherContractAddress = ethers.Wallet.createRandom().address;
   });
 
-  it("compiles with valid bytecode and exposes all RECEIVER_ABI methods", () => {
+  it("compiles AttestationReceiver.sol and exposes updated RECEIVER_ABI methods", () => {
     expect(artifact.bytecode.length).toBeGreaterThan(100);
 
     const iface = new ethers.Interface(artifact.abi);
     expect(iface.getFunction("receiveAttestation")).toBeDefined();
+    expect(iface.getFunction("revokeAttestation")).toBeDefined();
+    expect(iface.getFunction("rotateRelayer")).toBeDefined();
+    expect(iface.getFunction("acceptOwnership")).toBeDefined();
     expect(iface.getFunction("consumedNonce")).toBeDefined();
     expect(iface.getFunction("isCompliant")).toBeDefined();
-    expect(iface.getFunction("setRelayer")).toBeDefined();
-    expect(iface.getFunction("transferOwnership")).toBeDefined();
+    expect(RECEIVER_ABI.length).toBeGreaterThan(0);
   });
 
-  it("recovers the correct signer using EIP-191 digest format with domain separation", async () => {
-    const subject = ethers.Wallet.createRandom().address;
-    const policy = "defi_pool";
-    const compliant = true;
-    const id = "0000000100-0000000001";
-    const nonce = ethers.keccak256(ethers.toUtf8Bytes(String(id)));
+  it("recovers the authorized relayer from an EIP-712 typed-data signature", async () => {
+    const domain = {
+      name: EIP712_DOMAIN_NAME,
+      version: EIP712_DOMAIN_VERSION,
+      chainId,
+      verifyingContract: destinationContractAddress,
+    };
+    const message = {
+      subject: ethers.Wallet.createRandom().address,
+      policy: "defi_pool",
+      compliant: true,
+      stellarLedger: 100n,
+      expiresAt: 2_000_000_000n,
+      nonce: ethers.keccak256(ethers.toUtf8Bytes("0000000100-0000000001")),
+    };
 
-    // Relayer computes digest bound to chainId AND destinationContractAddress
-    const digest = ethers.solidityPackedKeccak256(
-      ["address", "string", "bool", "bytes32", "uint256", "address"],
-      [subject, policy, compliant, nonce, chainId, destinationContractAddress]
-    );
-    const signature = await relayerWallet.signMessage(ethers.getBytes(digest));
-
-    // Destination contract recovers signer from digest
-    const ethSignedDigest = ethers.hashMessage(ethers.getBytes(digest));
-    const recovered = ethers.recoverAddress(ethSignedDigest, signature);
-
+    const sig = await relayerWallet.signTypedData(domain, ATTESTATION_TYPES, message);
+    const recovered = ethers.verifyTypedData(domain, ATTESTATION_TYPES, message, sig);
     expect(recovered.toLowerCase()).toBe(relayerWallet.address.toLowerCase());
   });
 
-  it("rejects altered payload (subject, policy, or compliance status)", async () => {
-    const subject = ethers.Wallet.createRandom().address;
-    const otherSubject = ethers.Wallet.createRandom().address;
-    const policy = "defi_pool";
-    const compliant = true;
-    const id = "0000000100-0000000001";
-    const nonce = ethers.keccak256(ethers.toUtf8Bytes(String(id)));
+  it("breaks EIP-712 verification on payload alteration, wrong chainId, wrong contract, or wrong signer", async () => {
+    const domain = {
+      name: EIP712_DOMAIN_NAME,
+      version: EIP712_DOMAIN_VERSION,
+      chainId,
+      verifyingContract: destinationContractAddress,
+    };
+    const message = {
+      subject: ethers.Wallet.createRandom().address,
+      policy: "defi_pool",
+      compliant: true,
+      stellarLedger: 100n,
+      expiresAt: 2_000_000_000n,
+      nonce: ethers.keccak256(ethers.toUtf8Bytes("event-102")),
+    };
 
-    const digest = ethers.solidityPackedKeccak256(
-      ["address", "string", "bool", "bytes32", "uint256", "address"],
-      [subject, policy, compliant, nonce, chainId, destinationContractAddress]
-    );
-    const signature = await relayerWallet.signMessage(ethers.getBytes(digest));
+    const sig = await relayerWallet.signTypedData(domain, ATTESTATION_TYPES, message);
 
-    // Attacker alters subject
-    const alteredSubjectDigest = ethers.solidityPackedKeccak256(
-      ["address", "string", "bool", "bytes32", "uint256", "address"],
-      [otherSubject, policy, compliant, nonce, chainId, destinationContractAddress]
+    const tamperedRecovered = ethers.verifyTypedData(
+      domain,
+      ATTESTATION_TYPES,
+      { ...message, compliant: false },
+      sig
     );
-    const recoveredAlteredSubject = ethers.recoverAddress(
-      ethers.hashMessage(ethers.getBytes(alteredSubjectDigest)),
-      signature
-    );
-    expect(recoveredAlteredSubject.toLowerCase()).not.toBe(relayerWallet.address.toLowerCase());
+    expect(tamperedRecovered.toLowerCase()).not.toBe(relayerWallet.address.toLowerCase());
 
-    // Attacker alters policy
-    const alteredPolicyDigest = ethers.solidityPackedKeccak256(
-      ["address", "string", "bool", "bytes32", "uint256", "address"],
-      [subject, "admin_access", compliant, nonce, chainId, destinationContractAddress]
+    const wrongChainRecovered = ethers.verifyTypedData(
+      { ...domain, chainId: 1n },
+      ATTESTATION_TYPES,
+      message,
+      sig
     );
-    const recoveredAlteredPolicy = ethers.recoverAddress(
-      ethers.hashMessage(ethers.getBytes(alteredPolicyDigest)),
-      signature
+    expect(wrongChainRecovered.toLowerCase()).not.toBe(relayerWallet.address.toLowerCase());
+
+    const wrongContractRecovered = ethers.verifyTypedData(
+      { ...domain, verifyingContract: otherContractAddress },
+      ATTESTATION_TYPES,
+      message,
+      sig
     );
-    expect(recoveredAlteredPolicy.toLowerCase()).not.toBe(relayerWallet.address.toLowerCase());
-  });
+    expect(wrongContractRecovered.toLowerCase()).not.toBe(relayerWallet.address.toLowerCase());
 
-  it("rejects cross-chain replay with incorrect chain ID", async () => {
-    const subject = ethers.Wallet.createRandom().address;
-    const policy = "defi_pool";
-    const compliant = true;
-    const nonce = ethers.keccak256(ethers.toUtf8Bytes("event-101"));
-
-    const sepoliaDigest = ethers.solidityPackedKeccak256(
-      ["address", "string", "bool", "bytes32", "uint256", "address"],
-      [subject, policy, compliant, nonce, 11155111, destinationContractAddress]
+    const unauthorizedSig = await unauthorizedWallet.signTypedData(
+      domain,
+      ATTESTATION_TYPES,
+      message
     );
-    const signature = await relayerWallet.signMessage(ethers.getBytes(sepoliaDigest));
-
-    // Submitting signature to Ethereum Mainnet (chainId 1)
-    const mainnetDigest = ethers.solidityPackedKeccak256(
-      ["address", "string", "bool", "bytes32", "uint256", "address"],
-      [subject, policy, compliant, nonce, 1, destinationContractAddress]
-    );
-    const recoveredMainnet = ethers.recoverAddress(
-      ethers.hashMessage(ethers.getBytes(mainnetDigest)),
-      signature
-    );
-    expect(recoveredMainnet.toLowerCase()).not.toBe(relayerWallet.address.toLowerCase());
-  });
-
-  it("rejects signatures intended for another destination contract (destination separation)", async () => {
-    const subject = ethers.Wallet.createRandom().address;
-    const policy = "defi_pool";
-    const compliant = true;
-    const nonce = ethers.keccak256(ethers.toUtf8Bytes("event-102"));
-
-    // Signed specifically for contract A
-    const digestA = ethers.solidityPackedKeccak256(
-      ["address", "string", "bool", "bytes32", "uint256", "address"],
-      [subject, policy, compliant, nonce, chainId, destinationContractAddress]
-    );
-    const signatureA = await relayerWallet.signMessage(ethers.getBytes(digestA));
-
-    // Attacker attempts to replay signatureA against contract B
-    const digestB = ethers.solidityPackedKeccak256(
-      ["address", "string", "bool", "bytes32", "uint256", "address"],
-      [subject, policy, compliant, nonce, chainId, otherContractAddress]
-    );
-    const recoveredB = ethers.recoverAddress(
-      ethers.hashMessage(ethers.getBytes(digestB)),
-      signatureA
-    );
-    expect(recoveredB.toLowerCase()).not.toBe(relayerWallet.address.toLowerCase());
-  });
-
-  it("rejects signatures from unauthorized relayers", async () => {
-    const subject = ethers.Wallet.createRandom().address;
-    const policy = "defi_pool";
-    const compliant = true;
-    const nonce = ethers.keccak256(ethers.toUtf8Bytes("event-103"));
-
-    // Unauthorized party signs
-    const digest = ethers.solidityPackedKeccak256(
-      ["address", "string", "bool", "bytes32", "uint256", "address"],
-      [subject, policy, compliant, nonce, chainId, destinationContractAddress]
-    );
-    const unauthorizedSig = await unauthorizedWallet.signMessage(ethers.getBytes(digest));
-
-    const recovered = ethers.recoverAddress(
-      ethers.hashMessage(ethers.getBytes(digest)),
+    const unauthorizedRecovered = ethers.verifyTypedData(
+      domain,
+      ATTESTATION_TYPES,
+      message,
       unauthorizedSig
     );
-    expect(recovered.toLowerCase()).toBe(unauthorizedWallet.address.toLowerCase());
-    expect(recovered.toLowerCase()).not.toBe(relayerWallet.address.toLowerCase());
-  });
-
-  it("rejects invalid, truncated, or corrupted signatures", async () => {
-    const subject = ethers.Wallet.createRandom().address;
-    const digest = ethers.solidityPackedKeccak256(
-      ["address", "string", "bool", "bytes32", "uint256", "address"],
-      [subject, "policy", true, ethers.ZeroHash, chainId, destinationContractAddress]
-    );
-
-    // Malformed signature (invalid byte length) throws in ethers decoding
-    const malformedSig = "0x1234";
-    expect(() => {
-      ethers.recoverAddress(ethers.hashMessage(ethers.getBytes(digest)), malformedSig);
-    }).toThrow();
-
-    // Tampered signature (1 altered byte in r) fails recovery or recovers non-relayer
-    const validSig = await relayerWallet.signMessage(ethers.getBytes(digest));
-    const tamperedSig = validSig.slice(0, 10) + (validSig[10] === "a" ? "b" : "a") + validSig.slice(11);
-    let tamperedRecovered = null;
-    try {
-      tamperedRecovered = ethers.recoverAddress(
-        ethers.hashMessage(ethers.getBytes(digest)),
-        tamperedSig
-      );
-    } catch {
-      tamperedRecovered = ethers.ZeroAddress;
-    }
-    expect(tamperedRecovered.toLowerCase()).not.toBe(relayerWallet.address.toLowerCase());
-  });
-
-  it("prevents duplicate nonce replay and verifies nonce consumption lifecycle", () => {
-    const consumed = new Map();
-    const nonce = ethers.keccak256(ethers.toUtf8Bytes("stellar-event-seq-42"));
-
-    // First presentation: valid, unconsumed
-    expect(consumed.has(nonce)).toBe(false);
-    consumed.set(nonce, true);
-    expect(consumed.get(nonce)).toBe(true);
-
-    // Second presentation: duplicate attempt fails
-    const isReplay = consumed.get(nonce) === true;
-    expect(isReplay).toBe(true);
+    expect(unauthorizedRecovered.toLowerCase()).toBe(unauthorizedWallet.address.toLowerCase());
   });
 });

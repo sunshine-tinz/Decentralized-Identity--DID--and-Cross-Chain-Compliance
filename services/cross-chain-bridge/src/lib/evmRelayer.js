@@ -1,32 +1,45 @@
 /**
  * EVM Attestation Relayer
  *
- * Submits a signed compliance attestation to an AttestationReceiver contract on
- * an EVM chain.
+ * Submits EIP-712 signed compliance attestations to an AttestationReceiver
+ * contract on an EVM chain.
  *
- * # Signing scheme (integrator contract — read this)
- * The relayer signs an EIP-191 prefixed digest:
+ * EIP-712 Domain:
+ *   name: "StellarComplianceBridge"
+ *   version: "1"
+ *   chainId: <destination chainId>
+ *   verifyingContract: <AttestationReceiver address>
  *
- *   digest = keccak256(abi.encodePacked(
- *              subject, policy, compliant, nonce, chainId))
- *   signature = personal_sign(digest)
- *
- * `nonce` is the unique Stellar event id (keccak256 of it), so a destination
- * contract can reject replays by tracking consumed nonces. The destination MUST
- * verify the signature against an allowlisted relayer and MUST store the nonce.
- * See `contracts/evm/AttestationReceiver.sol`.
+ * Attestation struct:
+ *   (address subject, string policy, bool compliant, uint64 stellarLedger, uint64 expiresAt, bytes32 nonce)
  */
 
 "use strict";
 
 const { ethers } = require("ethers");
 
-// Interface implemented by AttestationReceiver (contracts/evm/AttestationReceiver.sol).
 const RECEIVER_ABI = [
-  "function receiveAttestation(address subject, string policy, bool compliant, bytes32 nonce, bytes signature) external",
+  "function receiveAttestation(address subject, string policy, bool compliant, uint64 stellarLedger, uint64 expiresAt, bytes32 nonce, bytes signature) external",
+  "function revokeAttestation(address subject, string policy, uint64 stellarLedger) external",
   "function consumedNonce(bytes32 nonce) view returns (bool)",
   "function isCompliant(address subject, string policy) view returns (bool)",
+  "function authorizedRelayers(address relayer) view returns (bool)",
 ];
+
+const EIP712_DOMAIN_NAME = "StellarComplianceBridge";
+const EIP712_DOMAIN_VERSION = "1";
+const ATTESTATION_TYPES = {
+  Attestation: [
+    { name: "subject", type: "address" },
+    { name: "policy", type: "string" },
+    { name: "compliant", type: "bool" },
+    { name: "stellarLedger", type: "uint64" },
+    { name: "expiresAt", type: "uint64" },
+    { name: "nonce", type: "bytes32" },
+  ],
+};
+
+const DEFAULT_ATTESTATION_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 class EVMRelayer {
   /**
@@ -34,11 +47,20 @@ class EVMRelayer {
    * @param {string} [options.rpcUrl]
    * @param {string} [options.receiverAddress]
    * @param {string} [options.privateKey]
+   * @param {number} [options.defaultTtlSeconds]
    * @param {object} [options.contract] - injected for tests
    * @param {object} [options.wallet] - injected for tests
    */
-  constructor({ rpcUrl, receiverAddress, privateKey, contract, wallet } = {}) {
+  constructor({
+    rpcUrl,
+    receiverAddress,
+    privateKey,
+    defaultTtlSeconds = DEFAULT_ATTESTATION_TTL_SECONDS,
+    contract,
+    wallet,
+  } = {}) {
     this.enabled = false;
+    this.defaultTtlSeconds = defaultTtlSeconds;
 
     if (contract && wallet) {
       this.contract = contract;
@@ -48,8 +70,6 @@ class EVMRelayer {
     }
 
     if (!rpcUrl || !receiverAddress || !privateKey) {
-      // Fail closed: callers must check `enabled` and must not silently treat a
-      // disabled relayer as success.
       return;
     }
 
@@ -60,18 +80,17 @@ class EVMRelayer {
   }
 
   /**
-   * Relay one attestation.
+   * Relay one attestation with an explicit EVM `subject`.
    *
-   * @param {object} attestation - { id, subject, policy, compliant, ledger }
-   * @returns {Promise<string>} transaction hash of a confirmed, successful tx
-   * @throws when unconfigured, malformed, or the transaction reverts
+   * @param {object} attestation - { id, subject (EVM 0x...), policy, compliant, ledger, expiresAt? }
+   * @returns {Promise<{hash: string, blockNumber: number|null, alreadyConfirmed?: boolean}>}
    */
   async relay(attestation) {
     if (!this.enabled) {
       throw new Error("EVM relayer is not configured");
     }
 
-    const { id, subject, policy, compliant } = attestation || {};
+    const { id, subject, policy, compliant, ledger, expiresAt } = attestation || {};
     if (!id) throw new Error("attestation.id is required");
     if (typeof subject !== "string" || !ethers.isAddress(subject)) {
       throw new Error("attestation.subject must be a valid EVM address");
@@ -82,39 +101,79 @@ class EVMRelayer {
     if (typeof compliant !== "boolean") {
       throw new Error("attestation.compliant must be a boolean");
     }
+    const stellarLedger = Number(ledger);
+    if (!Number.isInteger(stellarLedger) || stellarLedger <= 0) {
+      throw new Error("attestation.ledger must be a positive integer");
+    }
 
-    const network = await this.contract.runner?.provider?.getNetwork?.();
-    const chainId = network?.chainId ?? 0;
-    const targetAddress = typeof this.contract.getAddress === "function"
-      ? await this.contract.getAddress()
-      : (this.contract.target || ethers.ZeroAddress);
+    const effectiveExpiresAt =
+      Number.isInteger(expiresAt) && expiresAt > 0
+        ? expiresAt
+        : Math.floor(Date.now() / 1000) + this.defaultTtlSeconds;
 
     const nonce = ethers.keccak256(ethers.toUtf8Bytes(String(id)));
-    const digest = ethers.solidityPackedKeccak256(
-      ["address", "string", "bool", "bytes32", "uint256", "address"],
-      [subject, policy, compliant, nonce, chainId, targetAddress]
-    );
-    const signature = await this.wallet.signMessage(ethers.getBytes(digest));
 
-    const tx = await this.contract.receiveAttestation(
-      subject,
+    // Idempotency check across process restarts.
+    if (typeof this.contract.consumedNonce === "function") {
+      const alreadyConsumed = await this.contract.consumedNonce(nonce);
+      if (alreadyConsumed) {
+        return { hash: "already-consumed", blockNumber: null, alreadyConfirmed: true };
+      }
+    }
+
+    const network = await this.contract.runner?.provider?.getNetwork?.();
+    const chainId = network?.chainId ?? 0n;
+    const verifyingContract =
+      typeof this.contract.getAddress === "function"
+        ? await this.contract.getAddress()
+        : this.contract.target || ethers.ZeroAddress;
+
+    const domain = {
+      name: EIP712_DOMAIN_NAME,
+      version: EIP712_DOMAIN_VERSION,
+      chainId: BigInt(chainId),
+      verifyingContract,
+    };
+
+    const message = {
+      subject: ethers.getAddress(subject),
       policy,
       compliant,
+      stellarLedger: BigInt(stellarLedger),
+      expiresAt: BigInt(effectiveExpiresAt),
       nonce,
+    };
+
+    const signature = await this.wallet.signTypedData(domain, ATTESTATION_TYPES, message);
+
+    const tx = await this.contract.receiveAttestation(
+      message.subject,
+      message.policy,
+      message.compliant,
+      message.stellarLedger,
+      message.expiresAt,
+      message.nonce,
       signature
     );
 
     const receipt = await tx.wait();
-    // ethers resolves `wait()` for reverted transactions; a status of 0 must not
-    // be reported as a successful relay.
     if (!receipt || receipt.status !== 1) {
       throw new Error(
         `attestation transaction reverted (tx ${tx.hash}, status ${receipt && receipt.status})`
       );
     }
 
-    return tx.hash;
+    return {
+      hash: tx.hash,
+      blockNumber: receipt.blockNumber ?? null,
+    };
   }
 }
 
-module.exports = { EVMRelayer, RECEIVER_ABI };
+module.exports = {
+  EVMRelayer,
+  RECEIVER_ABI,
+  EIP712_DOMAIN_NAME,
+  EIP712_DOMAIN_VERSION,
+  ATTESTATION_TYPES,
+};

@@ -3,22 +3,13 @@
  *
  * Reads Soroban contract events emitted by the ComplianceEngine contract via the
  * Soroban RPC `getEvents` endpoint, decodes them, validates every field, and
- * emits a structured attestation.
- *
- * The previous implementation polled Horizon `/effects` and, for any
- * `contract_credited` effect it saw, fabricated `{ policy: "unknown",
- * compliant: true }`. Horizon effects cannot observe Soroban contract events at
- * all, so it relayed made-up compliance data (AUDIT.md C-10). This version emits
- * nothing it has not decoded and validated.
- *
- * Expected event (published by `ComplianceEngine::export_attestation`):
- *   topics: [Symbol("compliance"), Symbol("attestation")]
- *   data:   (subject: Address, policy: Symbol, compliant: bool)
+ * durably records them before advancing the persisted cursor.
  */
 
 "use strict";
 
 const fs = require("fs");
+const path = require("path");
 const { EventEmitter } = require("events");
 const { SorobanRpc, scValToNative } = require("@stellar/stellar-sdk");
 
@@ -34,8 +25,9 @@ class StellarListener extends EventEmitter {
    * @param {string} [options.rpcUrl]
    * @param {string} options.complianceContractId
    * @param {number} [options.pollIntervalMs]
-   * @param {string} [options.cursorFile] - omit to disable persistence
-   * @param {object} [options.server] - injected for tests
+   * @param {string|null} [options.cursorFile] - omit to disable persistence
+   * @param {object|null} [options.server] - injected for tests
+   * @param {(event: object) => Promise<void>|void} [options.onEventDurable]
    */
   constructor({
     rpcUrl,
@@ -43,6 +35,7 @@ class StellarListener extends EventEmitter {
     pollIntervalMs = 5_000,
     cursorFile = null,
     server = null,
+    onEventDurable = null,
   }) {
     super();
 
@@ -54,10 +47,12 @@ class StellarListener extends EventEmitter {
     this.pollIntervalMs = pollIntervalMs;
     this.cursorFile = cursorFile;
     this.server = server || new SorobanRpc.Server(rpcUrl);
+    this.onEventDurable = onEventDurable;
 
     this._cursor = null;
     this._processedIds = [];
     this._running = false;
+    this._timer = null;
     this._loadState();
   }
 
@@ -69,6 +64,10 @@ class StellarListener extends EventEmitter {
 
   stop() {
     this._running = false;
+    if (this._timer) {
+      clearTimeout(this._timer);
+      this._timer = null;
+    }
   }
 
   async _poll() {
@@ -81,18 +80,24 @@ class StellarListener extends EventEmitter {
         if (!parsed) continue;
         if (this._processedIds.includes(parsed.id)) continue;
 
+        // Only advance cursor / processed list after durable recording succeeds.
+        if (typeof this.onEventDurable === "function") {
+          await this.onEventDurable(parsed);
+        }
+
         this._processedIds.push(parsed.id);
         if (this._processedIds.length > MAX_PROCESSED_IDS) this._processedIds.shift();
         this._cursor = event.id;
+        this._saveState();
 
         this.emit("attestation", parsed);
       }
 
-      if (response.cursor) this._cursor = response.cursor;
-      this._saveState();
+      if (response.cursor) {
+        this._cursor = response.cursor;
+        this._saveState();
+      }
     } catch (err) {
-      // Emitted under a dedicated name: emitting "error" with no listener would
-      // throw and kill the process.
       this.emit("pollError", err);
     } finally {
       if (this._running) {
@@ -108,7 +113,12 @@ class StellarListener extends EventEmitter {
         {
           type: "contract",
           contractIds: [this.contractId],
-          topics: [[toScValString(TOPIC_NAMESPACE), toScValString(TOPIC_ATTESTATION)]],
+          topics: [
+            [
+              toScValString(TOPIC_NAMESPACE).toXDR("base64"),
+              toScValString(TOPIC_ATTESTATION).toXDR("base64"),
+            ],
+          ],
         },
       ],
       limit: 50,
@@ -132,7 +142,11 @@ class StellarListener extends EventEmitter {
    */
   _parseEvent(event) {
     if (!event || typeof event !== "object") return null;
-    if (event.contractId !== this.contractId) return null;
+    const eventContractId =
+      typeof event.contractId === "string"
+        ? event.contractId
+        : event.contractId?.contractId?.() || event.contractId?.toString?.();
+    if (eventContractId !== this.contractId) return null;
     if (!Array.isArray(event.topic) || event.topic.length < 2) return null;
     if (!event.id) return null;
 
@@ -153,15 +167,17 @@ class StellarListener extends EventEmitter {
     if (typeof subject !== "string" || !STELLAR_ADDRESS_RE.test(subject)) return null;
     if (typeof policy !== "string" || !SYMBOL_RE.test(policy)) return null;
     if (typeof compliant !== "boolean") return null;
-    if (typeof event.ledger !== "number" && typeof event.ledger !== "string") return null;
+
+    const ledger = Number(event.ledger);
+    if (!Number.isInteger(ledger) || ledger <= 0) return null;
 
     return {
-      id: event.id,
+      id: String(event.id),
       subject,
       policy,
       compliant,
-      ledger: event.ledger,
-      contractId: event.contractId,
+      ledger,
+      contractId: eventContractId,
     };
   }
 
@@ -182,21 +198,20 @@ class StellarListener extends EventEmitter {
   _saveState() {
     if (!this.cursorFile) return;
     try {
+      fs.mkdirSync(path.dirname(this.cursorFile), { recursive: true });
+      const tmp = `${this.cursorFile}.tmp`;
       fs.writeFileSync(
-        this.cursorFile,
+        tmp,
         JSON.stringify({ cursor: this._cursor, processedIds: this._processedIds }),
         { mode: 0o600 }
       );
+      fs.renameSync(tmp, this.cursorFile);
     } catch (err) {
       this.emit("pollError", err);
     }
   }
 }
 
-/**
- * Build an ScVal encoding of a contract-event topic symbol. The SDK's
- * `nativeToScVal` is used lazily so this module can be required without one.
- */
 function toScValString(value) {
   const { nativeToScVal } = require("@stellar/stellar-sdk");
   return nativeToScVal(value, { type: "symbol" });
