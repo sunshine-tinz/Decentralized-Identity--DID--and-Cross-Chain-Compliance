@@ -627,4 +627,81 @@ mod tests {
             .set_policy(&f.admin, &f.policy, &vec![&env, kyc(&env)]);
         assert!(!f.client.is_compliant(&f.subject, &f.policy));
     }
+
+    /// Phase 6: explicit negative authorization & cross-contract boundary tests without `mock_all_auths`.
+    #[test]
+    fn test_compliance_engine_auth_and_cross_contract_boundaries() {
+        use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+
+        let env = Env::default();
+        set_ledger(&env, 100);
+
+        let verifier_id = env.register_contract(None, VCVerifier);
+        let verifier = VCVerifierClient::new(&env, &verifier_id);
+
+        let engine_id = env.register_contract(None, ComplianceEngine);
+        let client = ComplianceEngineClient::new(&env, &engine_id);
+
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let policy = Symbol::new(&env, "defi_pool");
+
+        verifier.initialize(&admin);
+        client.initialize(&admin);
+
+        // Unauthenticated set_verifier fails
+        assert!(client.try_set_verifier(&admin, &verifier_id).is_err());
+
+        // Attacker calling set_verifier fails
+        env.mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &engine_id,
+                fn_name: "set_verifier",
+                args: (admin.clone(), verifier_id.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(client.try_set_verifier(&admin, &verifier_id).is_err());
+
+        // Admin sets verifier and policy with valid auth
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &engine_id,
+                fn_name: "set_verifier",
+                args: (admin.clone(), verifier_id.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.set_verifier(&admin, &verifier_id);
+
+        let reqs = vec![&env, kyc(&env)];
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &engine_id,
+                fn_name: "set_policy",
+                args: (admin.clone(), policy.clone(), reqs.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.set_policy(&admin, &policy, &reqs);
+
+        // Attacker cannot set policy
+        env.mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &engine_id,
+                fn_name: "set_policy",
+                args: (admin.clone(), policy.clone(), reqs.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(client.try_set_policy(&admin, &policy, &reqs).is_err());
+
+        // Uncredentialed subject evaluates false (fail-closed)
+        assert!(!client.is_compliant(&subject, &policy));
+    }
 }

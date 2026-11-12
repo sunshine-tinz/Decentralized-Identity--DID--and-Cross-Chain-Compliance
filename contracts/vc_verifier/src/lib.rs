@@ -79,6 +79,7 @@ const ADMIN_KEY: &str = "ADMIN";
 const ISSUERS_KEY: &str = "ISSUERS";
 const RING_PREFIX: &str = "RING";
 const CRED_PREFIX: &str = "CRED";
+const VC_HASH_PREFIX: &str = "VC_HASH";
 
 /// Maximum number of members in an attribute ring. Bounds verification cost and
 /// limits the storage/gas impact of an attacker-supplied ring.
@@ -366,6 +367,42 @@ impl VCVerifier {
         credential
     }
 
+    /// Issue an attested credential while anchoring the SHA-256 digest of an
+    /// off-chain W3C Verifiable Credential JSON-LD document.
+    pub fn issue_credential_anchored(
+        env: Env,
+        issuer: Address,
+        subject: Address,
+        attribute: Symbol,
+        expires_at: u32,
+        vc_hash: BytesN<32>,
+    ) -> Credential {
+        let credential = Self::issue_credential(
+            env.clone(),
+            issuer,
+            subject.clone(),
+            attribute.clone(),
+            expires_at,
+        );
+        let hash_key = Self::vc_hash_key(&env, &subject, &attribute);
+        env.storage().persistent().set(&hash_key, &vc_hash);
+        env.storage()
+            .persistent()
+            .extend_ttl(&hash_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        credential
+    }
+
+    /// Returns the anchored W3C VC SHA-256 digest for `(subject, attribute)`, if present.
+    pub fn get_credential_hash(
+        env: Env,
+        subject: Address,
+        attribute: Symbol,
+    ) -> Option<BytesN<32>> {
+        env.storage()
+            .persistent()
+            .get(&Self::vc_hash_key(&env, &subject, &attribute))
+    }
+
     /// Revoke a credential.
     ///
     /// Only the issuer of record (the address that attested this slot) or the
@@ -466,6 +503,14 @@ impl VCVerifier {
     fn cred_key(env: &Env, subject: &Address, attribute: &Symbol) -> (Symbol, Address, Symbol) {
         (
             Symbol::new(env, CRED_PREFIX),
+            subject.clone(),
+            attribute.clone(),
+        )
+    }
+
+    fn vc_hash_key(env: &Env, subject: &Address, attribute: &Symbol) -> (Symbol, Address, Symbol) {
+        (
+            Symbol::new(env, VC_HASH_PREFIX),
             subject.clone(),
             attribute.clone(),
         )
@@ -847,5 +892,107 @@ mod tests {
             remaining > 17_280,
             "credential TTL must outlive the old 24h window, got {remaining}"
         );
+    }
+
+    #[test]
+    fn test_issue_credential_anchored_stores_digest() {
+        let env = Env::default();
+        let (client, _admin, issuer) = setup(&env);
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[0xAB; 32]);
+
+        client.issue_credential_anchored(&issuer, &subject, &attr(&env), &1_000, &vc_hash);
+        assert!(client.is_credential_valid(&subject, &attr(&env)));
+        assert_eq!(
+            client.get_credential_hash(&subject, &attr(&env)),
+            Some(vc_hash)
+        );
+    }
+
+    /// Phase 6: explicit negative authorization tests without `mock_all_auths`.
+    #[test]
+    fn test_vc_verifier_rejects_missing_or_wrong_auth() {
+        use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+        use soroban_sdk::IntoVal;
+
+        let env = Env::default();
+        set_ledger(&env, 100);
+        let contract_id = env.register_contract(None, VCVerifier);
+        let client = VCVerifierClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let attribute = attr(&env);
+
+        client.initialize(&admin);
+
+        // Unauthenticated add_issuer fails
+        assert!(client.try_add_issuer(&admin, &issuer).is_err());
+
+        // Attacker signing as attacker while claiming admin fails
+        env.mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "add_issuer",
+                args: (admin.clone(), issuer.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(client.try_add_issuer(&admin, &issuer).is_err());
+
+        // Admin registers issuer with proper admin auth
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "add_issuer",
+                args: (admin.clone(), issuer.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.add_issuer(&admin, &issuer);
+
+        // Attacker cannot issue on behalf of registered issuer
+        env.mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "issue_credential",
+                args: (issuer.clone(), subject.clone(), attribute.clone(), 1_000u32).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(client
+            .try_issue_credential(&issuer, &subject, &attribute, &1_000)
+            .is_err());
+
+        // Registered issuer issues with own auth
+        env.mock_auths(&[MockAuth {
+            address: &issuer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "issue_credential",
+                args: (issuer.clone(), subject.clone(), attribute.clone(), 1_000u32).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.issue_credential(&issuer, &subject, &attribute, &1_000);
+
+        // Attacker cannot revoke credential
+        env.mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "revoke_credential",
+                args: (issuer.clone(), subject.clone(), attribute.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(client
+            .try_revoke_credential(&issuer, &subject, &attribute)
+            .is_err());
     }
 }
